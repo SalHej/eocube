@@ -1,0 +1,31 @@
+cff-version: 1.2.0
+title: "eocube: contract-checked multi-source Earth Observation data cubes"
+message: "If you use this software, please cite the accompanying preprint."
+type: software
+authors:
+  - family-names: Al-Heejawi
+    given-names: Salah Mohammed Awad
+    orcid: "https://orcid.org/0000-0003-1949-6715"
+version: 0.2.0
+doi: 10.5281/zenodo.22552042
+license: Apache-2.0
+repository-code: "https://github.com/SalHej/eocube"
+keywords:
+  - earth observation
+  - remote sensing
+  - data cube
+  - multi-sensor fusion
+  - provenance
+  - automl
+preferred-citation:
+  type: article
+  title: "Agentic Large Language Model Workflows for Earth Observation: Tool
+    Orchestration, Foundation-Model Adaptation, and the Evaluation Gap"
+  authors:
+    - family-names: Al-Heejawi
+      given-names: Salah Mohammed Awad
+      orcid: "https://orcid.org/0000-0003-1949-6715"
+  year: 2026
+  doi: "10.31223/X5TN59"
+  publisher:
+    name: EarthArXiv

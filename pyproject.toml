@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eocube"
+version = "0.2.0"
+description = "Contract-checked multi-source Earth Observation data cubes"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Salah Mohammed Awad Al-Heejawi", email = "alheejaw@ualberta.ca" }]
+keywords = ["earth observation", "remote sensing", "data cube", "SAR",
+            "multi-sensor fusion", "data validation", "provenance", "automl"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: GIS",
+]
+dependencies = []
+
+[project.optional-dependencies]
+raster = ["rasterio>=1.3", "numpy>=1.24"]
+dev = ["pytest>=7", "ruff>=0.4"]
+
+[project.urls]
+Homepage = "https://github.com/SalHej/eocube"
+Preprint = "https://doi.org/10.31223/X5TN59"
+Archive = "https://doi.org/10.5281/zenodo.22552042"
+
+[tool.setuptools.packages.find]
+include = ["eocube*"]
+
+[tool.ruff]
+line-length = 100

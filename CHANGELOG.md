@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.3.0
+
+**Added**
+- `eocube.pipeline` — sample extraction from cubes and, critically,
+  `spatial_block_split`. EO data is spatially autocorrelated, so a random
+  train/test split places near-duplicate pixels on both sides and inflates every
+  metric. Blocks are assigned whole to folds instead.
+- `make_train_eval()` — builds the `train_eval(layers, seed) -> metric` callable
+  the ablation harness expects, with optional exclusion of gap-filled pixels from
+  the test set.
+- `eocube.baselines` — interchangeable `fit_predict` implementations: pure-NumPy
+  ridge (no dependencies), scikit-learn random forest and gradient boosting, and
+  a PyTorch MLP that uses the GPU when one is available.
+- `examples/retrieval_experiment.py` — full cube to contracts to samples to model
+  to ablation, with a side-by-side comparison of random and spatial splits.
+- Test suite expanded to 41 tests.
+
+**Note on expectations**
+- For pixel-wise tabular retrieval a random forest is a strong baseline. If a
+  deep model does not beat it, that is a result about the task and should be
+  reported rather than tuned away.
+
 ## v0.2.0
 
 **Added**

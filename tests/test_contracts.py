@@ -133,3 +133,59 @@ def test_report_serialises():
     d = rep.to_dict()
     assert "gates" in d and isinstance(d["ok"], bool)
     assert isinstance(rep.provenance(), list)
+
+# regressions from the first real-data run (Sentinel-2, docs/real_data_run.md)
+DEG = dict(crs="EPSG:4326", gsd=8.983e-05, gsd_units="degree")
+
+def test_mixed_gsd_units_refuses():
+    r = check_resolution([L("utm"), L("geo", **DEG)])
+    assert r.verdict is Verdict.REFUSE
+    assert "different units" in r.reasons[0]
+
+def test_metre_target_on_degree_grid_refuses():
+    r = check_resolution([L("geo", **DEG)], target_gsd=10.0)
+    assert r.verdict is Verdict.REFUSE
+
+def test_degree_gsd_not_labelled_as_metres():
+    r = check_resolution([L("a", **DEG), L("b", **DEG)])
+    assert r.verdict is Verdict.PASS_WITH_DECISION
+    assert not any(" m)" in d or " m " in d for d in r.decisions)
+    assert any("degree" in d for d in r.decisions)
+
+def test_layers_without_units_still_treated_as_metres():
+    assert check_resolution([L("a"), L("b")], target_gsd=10.0).verdict is Verdict.PASS
+
+def test_multiband_zero_fill_above_threshold_refuses():
+    r = check_quality_missingness([L("emb", nodata=None, band_count=64,
+                                    zero_fill_fraction=0.404)])
+    assert r.verdict is Verdict.REFUSE
+    assert "unflagged fill" in r.reasons[0]
+
+def test_multiband_zero_fill_with_gapfill_is_a_decision():
+    r = check_quality_missingness([L("emb", band_count=64, zero_fill_fraction=0.404)],
+                                  gap_fill="nearest")
+    assert r.verdict is Verdict.PASS_WITH_DECISION
+
+def test_single_band_zeros_are_logged_not_refused():
+    r = check_quality_missingness([L("mask", band_count=1, zero_fill_fraction=0.9)])
+    assert r.verdict is Verdict.PASS_WITH_DECISION
+
+def test_unknown_modality_is_named_not_passed():
+    r = check_sensor_physics([L("rgb"), L("emb", modality="embedding")])
+    assert r.verdict is Verdict.PASS_WITH_DECISION
+    assert r.evidence["unchecked_layers"] == ["emb"]
+
+def test_no_checkable_layer_is_not_evaluated():
+    r = check_sensor_physics([L("emb", modality="embedding"), L("x", modality=None)])
+    assert r.verdict is Verdict.NOT_EVALUATED
+    assert r.ok
+
+def test_temporal_gate_without_times_is_reported_not_omitted():
+    rep = run_all_gates([L("a")])
+    gate = {r.gate: r for r in rep.results}["temporal_alignment"]
+    assert gate.verdict is Verdict.NOT_EVALUATED
+    assert rep.ok and rep.not_evaluated == [gate]
+
+def test_skipped_temporal_gate_is_absent():
+    rep = run_all_gates([L("a")], skip=["temporal_alignment"])
+    assert "temporal_alignment" not in [r.gate for r in rep.results]

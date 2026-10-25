@@ -13,7 +13,7 @@ import pytest
 rasterio = pytest.importorskip("rasterio")
 from rasterio.transform import from_origin  # noqa: E402
 
-from eocube import run_all_gates  # noqa: E402
+from eocube import Verdict, run_all_gates  # noqa: E402
 from eocube.io import _invalid_fraction, describe, describe_many, to_descriptor  # noqa: E402
 
 CRS = "EPSG:32635"
@@ -25,11 +25,12 @@ def make_tif(tmp_path):
     """Write a GeoTIFF and return its path.
 
     ``data`` is (rows, cols) or (bands, rows, cols). Pixel size defaults to 10 m
-    square; pass ``res=(x, y)`` for non-square pixels.
+    square; pass ``res=(x, y)`` for non-square pixels and ``origin`` for a
+    CRS other than the default UTM zone.
     """
 
     def _make(name="layer", data=None, *, crs=CRS, res=(10.0, 10.0), nodata=None,
-              dtype="float32"):
+              dtype="float32", origin=ORIGIN):
         if data is None:
             data = np.ones((20, 20), dtype=dtype)
         data = np.asarray(data, dtype=dtype)
@@ -40,7 +41,7 @@ def make_tif(tmp_path):
             path, "w", driver="GTiff",
             height=data.shape[1], width=data.shape[2], count=data.shape[0],
             dtype=dtype, crs=crs, nodata=nodata,
-            transform=from_origin(ORIGIN[0], ORIGIN[1], res[0], res[1]),
+            transform=from_origin(origin[0], origin[1], res[0], res[1]),
         ) as dst:
             dst.write(data)
         return path
@@ -146,7 +147,8 @@ def test_read_stats_false_omits_invalid_fraction(make_tif):
 def test_unknown_invalid_fraction_is_not_treated_as_zero(make_tif):
     """The describe() docstring promises the quality gate will say so."""
     layer = describe(make_tif(), read_stats=False)
-    rep = run_all_gates([layer], skip=["geometry_crs", "resolution", "sensor_physics"])
+    rep = run_all_gates([layer], skip=["geometry_crs", "resolution", "temporal_alignment",
+                                       "sensor_physics"])
     gate = rep.results[0]
     assert gate.gate == "quality_missingness"
     assert gate.evidence["per_layer"][layer["name"]]["invalid_fraction"] is None
@@ -212,7 +214,8 @@ def test_decimation_appears_in_quality_gate_evidence(make_tif):
     data = np.ones((100, 100))
     data[:50, :] = np.nan
     layer = describe(make_tif(data=data), max_stat_pixels=400)
-    rep = run_all_gates([layer], skip=["geometry_crs", "resolution", "sensor_physics"])
+    rep = run_all_gates([layer], skip=["geometry_crs", "resolution", "temporal_alignment",
+                                       "sensor_physics"])
     gate = rep.results[0]
     entry = gate.evidence["per_layer"][layer["name"]]
     assert entry["sampling"]["decimation_step"] == 5
@@ -265,3 +268,96 @@ def test_descriptor_with_nan_nodata_is_strict_json(make_tif):
     back = json.loads(json.dumps(doc, allow_nan=False))
     assert back["layers"][0]["nodata"] == "nan"
     assert back["verdict"] == "unchecked"
+
+
+# --------------------------------------------------------------------------
+# regressions from the first real-data run (Sentinel-2, docs/real_data_run.md)
+# --------------------------------------------------------------------------
+S2_DEG = 8.983152841195215e-05      # "10 m" in degrees, as in the Vilnius tiles
+VILNIUS = (25.22038126, 54.72177385)
+
+
+def test_projected_gsd_is_in_metres(make_tif):
+    layer = describe(make_tif())
+    assert layer["gsd_units"] == "metre"
+    assert "gsd_ground_m" not in layer
+
+
+def test_geographic_gsd_is_labelled_degrees_with_ground_size(make_tif):
+    p = make_tif(data=np.ones((20, 20)), crs="EPSG:4326", res=(S2_DEG, S2_DEG),
+                 origin=VILNIUS)
+    layer = describe(p)
+    assert layer["gsd_units"] == "degree"
+    assert layer["gsd"] == pytest.approx(S2_DEG)
+    gx, gy = layer["gsd_ground_m"]
+    assert gx == pytest.approx(5.78, abs=0.05)   # east-west shrinks with cos(latitude)
+    assert gy == pytest.approx(10.0, abs=0.05)
+    assert any("not square" in c for c in layer["provenance"]["conflicts"])
+
+
+def test_zero_fill_without_nodata_is_reported(make_tif):
+    data = np.ones((4, 10, 10))
+    data[:, :4, :] = 0.0                          # top 40% zero in every band
+    layer = describe(make_tif(data=data))
+    assert layer["nodata"] is None
+    assert layer["invalid_fraction"] == 0.0       # nothing flagged, so nothing counted...
+    assert layer["zero_fill_fraction"] == pytest.approx(0.4)   # ...but the evidence is kept
+    assert layer["invalid_fraction_sampling"]["nodata_source"] is None
+
+
+def test_zero_in_some_bands_is_not_zero_fill(make_tif):
+    data = np.ones((3, 10, 10))
+    data[0] = 0.0
+    assert describe(make_tif(data=data))["zero_fill_fraction"] == 0.0
+
+
+def test_zero_fill_fraction_absent_when_file_declares_nodata(make_tif):
+    layer = describe(make_tif(data=np.zeros((2, 5, 5)), nodata=-1.0))
+    assert "zero_fill_fraction" not in layer
+
+
+def test_declared_nodata_used_when_file_has_none(make_tif):
+    data = np.ones((2, 10, 10))
+    data[:, :4, :] = 0.0
+    layer = describe(make_tif(data=data), declared={"nodata": 0})
+    assert layer["invalid_fraction"] == pytest.approx(0.4)
+    assert layer["nodata"] is None                # the observed value is unchanged
+    assert layer["provenance"]["declared"]["nodata"] == 0
+    assert layer["provenance"]["conflicts"] == []
+    assert layer["invalid_fraction_sampling"]["nodata_source"] == "declared"
+
+
+def test_declared_nodata_contradicting_file_still_conflicts(make_tif):
+    layer = describe(make_tif(nodata=-9999.0), declared={"nodata": 0})
+    assert layer["nodata"] == -9999.0
+    assert any("declared nodata" in c for c in layer["provenance"]["conflicts"])
+
+
+def test_value_range_excludes_nodata(make_tif):
+    data = np.array([[0.1, 0.5], [-9999.0, 0.3]])
+    layer = describe(make_tif(data=data, nodata=-9999.0))
+    assert layer["value_range"] == pytest.approx([0.1, 0.5])
+
+
+def test_float64_multiband_reads(make_tif):
+    """The real embeddings are 64-band float64; the fixtures had been float32."""
+    layer = describe(make_tif(data=np.full((64, 6, 6), 0.125), dtype="float64"))
+    assert layer["dtype"] == "float64"
+    assert layer["band_count"] == 64
+    assert len(layer["invalid_fraction_by_band"]) == 64
+    json.dumps(to_descriptor([layer]), allow_nan=False)
+
+
+def test_real_shaped_tile_is_refused_by_quality_gate(make_tif):
+    """End to end on a miniature of the Vilnius embedding tile: EPSG:4326, no
+    nodata tag, top 40% zero vectors. It was accepted with 0% invalid."""
+    data = np.full((4, 10, 10), 0.5)
+    data[:, :4, :] = 0.0
+    layer = describe(make_tif(data=data, crs="EPSG:4326", res=(S2_DEG, S2_DEG),
+                              origin=VILNIUS), "emb")
+    rep = run_all_gates([layer])
+    by_gate = {r.gate: r for r in rep.results}
+    assert by_gate["quality_missingness"].verdict is Verdict.REFUSE
+    assert by_gate["temporal_alignment"].verdict is Verdict.NOT_EVALUATED
+    assert by_gate["sensor_physics"].verdict is Verdict.NOT_EVALUATED
+    assert not rep.ok

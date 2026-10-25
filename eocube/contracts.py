@@ -57,6 +57,10 @@ class Verdict(str, Enum):
     PASS_WITH_DECISION = "pass_with_decision"
     #: Contract cannot be satisfied. The cube must not be used for inference.
     REFUSE = "refuse"
+    #: The gate had nothing to inspect: no acquisition times, no layer of a
+    #: modality it has rules for. Not a pass. Silently omitting the gate made an
+    #: idle check indistinguishable from one that was never configured.
+    NOT_EVALUATED = "not_evaluated"
 
 
 @dataclass
@@ -111,11 +115,16 @@ class ContractReport:
             ],
         }
 
+    @property
+    def not_evaluated(self) -> list[GateResult]:
+        return [r for r in self.results if r.verdict is Verdict.NOT_EVALUATED]
+
     def __str__(self) -> str:  # pragma: no cover - cosmetic
         lines = [str(r) for r in self.results]
         lines.append(
             f"\nCUBE VERDICT: {'ACCEPTED' if self.ok else 'REFUSED'} "
-            f"({len(self.refusals)} refusing gate(s))"
+            f"({len(self.refusals)} refusing gate(s), "
+            f"{len(self.not_evaluated)} not evaluated)"
         )
         return "\n".join(lines)
 
@@ -200,6 +209,11 @@ def check_resolution(
     Upsampling a coarse band to a fine grid manufactures detail that was never
     observed. Where it is permitted it must be recorded, because effective
     resolution is otherwise overstated in every downstream result.
+
+    GSDs are compared only within one unit. A layer's ``gsd_units`` (set by
+    :func:`eocube.io.describe`) defaults to metres when absent; ``target_gsd`` is
+    always metres. A geographic layer's GSD is in degrees, and comparing it
+    with metres, or labelling it as metres, is meaningless.
     """
     res = GateResult(gate="resolution", verdict=Verdict.PASS)
     gsds = {l["name"]: float(l["gsd"]) for l in layers}
@@ -209,12 +223,38 @@ def check_resolution(
         res.reasons.append("no layers supplied")
         return res
 
+    units = {l["name"]: l.get("gsd_units", "metre") or "unknown" for l in layers}
+    res.evidence["gsd_units"] = units
+    if len(set(units.values())) > 1:
+        res.verdict = Verdict.REFUSE
+        res.reasons.append(
+            f"layers report GSD in different units {sorted(set(units.values()))}; "
+            "reproject to a common CRS before comparing resolution"
+        )
+        return res
+    unit = next(iter(units.values()))
+    if target_gsd is not None and unit != "metre":
+        res.verdict = Verdict.REFUSE
+        res.reasons.append(
+            f"target_gsd={target_gsd} is in metres but the layers are on a {unit} grid; "
+            "reproject to a projected CRS first"
+        )
+        return res
+    u = " m" if unit == "metre" else f" {unit}"
+    if unit == "degree":
+        ground = {l["name"]: l["gsd_ground_m"] for l in layers if l.get("gsd_ground_m")}
+        if ground:
+            res.evidence["gsd_ground_m"] = ground
+        res.decisions.append(
+            "GSD is in degrees (geographic CRS); ground resolution varies with latitude "
+            "and pixels are not square on the ground"
+        )
+
     target = float(target_gsd) if target_gsd is not None else max(gsds.values())
     res.evidence["target_gsd"] = target
     if target_gsd is None:
-        res.verdict = Verdict.PASS_WITH_DECISION
         res.decisions.append(
-            f"no target GSD supplied; defaulted to the coarsest input ({target} m) "
+            f"no target GSD supplied; defaulted to the coarsest input ({target}{u}) "
             "so that no layer is upsampled"
         )
 
@@ -223,22 +263,20 @@ def check_resolution(
             if not allow_upsampling:
                 res.verdict = Verdict.REFUSE
                 res.reasons.append(
-                    f"layer '{name}' at {g} m would be upsampled to {target} m; "
+                    f"layer '{name}' at {g}{u} would be upsampled to {target}{u}; "
                     "set allow_upsampling=True and justify it, or coarsen the target"
                 )
             else:
-                if res.verdict is Verdict.PASS:
-                    res.verdict = Verdict.PASS_WITH_DECISION
                 res.decisions.append(
-                    f"layer '{name}' upsampled {g} m -> {target} m using "
-                    f"{resampling}; effective resolution remains {g} m"
+                    f"layer '{name}' upsampled {g}{u} -> {target}{u} using "
+                    f"{resampling}; effective resolution remains {g}{u}"
                 )
         elif g < target:
-            if res.verdict is Verdict.PASS:
-                res.verdict = Verdict.PASS_WITH_DECISION
             res.decisions.append(
-                f"layer '{name}' downsampled {g} m -> {target} m using {resampling}"
+                f"layer '{name}' downsampled {g}{u} -> {target}{u} using {resampling}"
             )
+    if res.decisions and res.verdict is Verdict.PASS:
+        res.verdict = Verdict.PASS_WITH_DECISION
     return res
 
 
@@ -343,6 +381,13 @@ def check_quality_missingness(
     as a perfect one. If the figure came from a decimated read
     (``invalid_fraction_sampling``, set by :func:`eocube.io.describe`), the
     evidence carries the decimation step and the messages call it an estimate.
+
+    A layer that declares no nodata value can only be measured for NaN, so a
+    fill of zeros reads as 0% invalid. ``zero_fill_fraction`` (pixels exactly
+    zero in every band) is the evidence against that. In a multi-band layer a
+    pixel that is 0 in every band is almost never a measurement, so above the
+    threshold it is treated like measured invalidity. In a single band, zero is
+    often a legitimate value (a mask, a class, no rain), so it is only recorded.
     """
     res = GateResult(gate="quality_missingness", verdict=Verdict.PASS)
     per_layer: dict[str, Any] = {}
@@ -398,6 +443,27 @@ def check_quality_missingness(
                 f"layer '{name}' retains {frac:.1%} invalid pixels{how}, masked not filled"
             )
 
+        zero = l.get("zero_fill_fraction")
+        if zero:
+            per_layer[name]["zero_fill_fraction"] = round(float(zero), 4)
+            bands = int(l.get("band_count", 1) or 1)
+            suspect = (f"layer '{name}' declares no nodata value, but {zero:.1%} of its "
+                       f"pixels are exactly zero in all {bands} band(s){how}")
+            if bands > 1 and zero > max_invalid_fraction and gap_fill is None:
+                res.verdict = Verdict.REFUSE
+                res.reasons.append(
+                    f"{suspect}; that is almost certainly unflagged fill, above the "
+                    f"{max_invalid_fraction:.0%} threshold. Declare the fill value "
+                    "(declared={'nodata': 0}) or mask it"
+                )
+            else:
+                if res.verdict is Verdict.PASS:
+                    res.verdict = Verdict.PASS_WITH_DECISION
+                res.decisions.append(
+                    f"{suspect}; if that is fill, the true invalid fraction is at "
+                    "least this high"
+                )
+
     res.evidence["per_layer"] = per_layer
     if gap_fill:
         res.evidence["gap_fill_policy"] = gap_fill
@@ -438,10 +504,31 @@ def check_sensor_physics(
     and incidence-angle correction. The failure prevented is arithmetic that is
     syntactically valid and physically meaningless: averaging decibels, or computing
     a normalised difference index across an optical and a radar band.
+
+    A layer with no modality, or one this gate has no rules for (a learned
+    embedding, say), is named in the decisions as unchecked rather than passed
+    in silence. If no layer is checkable and there are no expressions, the
+    verdict is ``NOT_EVALUATED``.
     """
     res = GateResult(gate="sensor_physics", verdict=Verdict.PASS)
     by_name = {l["name"]: l for l in layers}
     res.evidence["modalities"] = {n: l.get("modality") for n, l in by_name.items()}
+
+    unchecked = [n for n, l in by_name.items()
+                 if str(l.get("modality", "")).lower() not in _OPTICAL | _RADAR]
+    res.evidence["unchecked_layers"] = unchecked
+    for name in unchecked:
+        modality = by_name[name].get("modality")
+        res.decisions.append(
+            f"layer '{name}' declares no modality; not checked" if not modality else
+            f"layer '{name}' declares modality '{modality}', which this gate has no "
+            "physical rules for; not checked"
+        )
+    if unchecked and len(unchecked) == len(by_name) and not band_expressions:
+        res.verdict = Verdict.NOT_EVALUATED
+        return res
+    if unchecked:
+        res.verdict = Verdict.PASS_WITH_DECISION
 
     for name, l in by_name.items():
         modality = str(l.get("modality", "")).lower()
@@ -519,6 +606,11 @@ def run_all_gates(
     makes "careful preprocessing" a measurable system property rather than a claim
     about researcher diligence. Ablation studies should record which gate was
     removed alongside the downstream metric.
+
+    A gate that is not skipped but has no inputs (temporal alignment without
+    ``acquisitions`` and ``target_time``) is reported as ``NOT_EVALUATED``
+    rather than left out, so "skipped on purpose" and "had nothing to check"
+    stay distinguishable.
     """
     report = ContractReport()
 
@@ -549,6 +641,15 @@ def run_all_gates(
                 forbid_future=kwargs.get("forbid_future", True),
             )
         )
+    elif "temporal_alignment" not in skip:
+        missing = [k for k, v in (("acquisitions", acquisitions),
+                                  ("target_time", target_time)) if not v]
+        report.results.append(GateResult(
+            gate="temporal_alignment", verdict=Verdict.NOT_EVALUATED,
+            decisions=[f"no {' or '.join(missing)} supplied; compositing window, "
+                       "asynchrony and temporal leakage were not checked"],
+            evidence={"missing_inputs": missing},
+        ))
     if "quality_missingness" not in skip:
         report.results.append(
             check_quality_missingness(

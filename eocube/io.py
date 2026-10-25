@@ -50,13 +50,15 @@ __all__ = [
 ]
 
 #: 0.3: per-band invalid fractions, decimation record, non-finite floats as strings.
-DESCRIPTOR_VERSION = "eocube-cube-descriptor/0.3"
+#: 0.4: gsd_units and ground GSD for geographic CRS, zero_fill_fraction, value_range,
+#:      declared nodata honoured when the file has none.
+DESCRIPTOR_VERSION = "eocube-cube-descriptor/0.4"
 
 #: Fields that can be read from a raster, and therefore verified.
 OBSERVABLE = (
-    "crs", "transform", "width", "height", "gsd", "dtype", "nodata",
-    "invalid_fraction", "invalid_fraction_by_band", "invalid_fraction_sampling",
-    "band_count", "value_range",
+    "crs", "transform", "width", "height", "gsd", "gsd_units", "gsd_ground_m", "dtype",
+    "nodata", "invalid_fraction", "invalid_fraction_by_band", "invalid_fraction_sampling",
+    "zero_fill_fraction", "band_count", "value_range",
 )
 
 #: Fields that cannot be derived from pixels and must be declared by the
@@ -92,7 +94,38 @@ def _require_rasterio() -> None:
         )
 
 
-def _invalid_fraction(src, max_pixels: int = 4_000_000) -> dict[str, Any]:
+def _gsd_units(crs) -> str | None:
+    """Unit of the transform's pixel size: ``"metre"``, ``"degree"``, or the CRS's own.
+
+    The first real Sentinel-2 file this package read was in EPSG:4326, and its
+    pixel size of 0.0000898 was reported, and gated, as metres. A GSD is only a
+    number in some unit; without the unit, two layers cannot be compared.
+    """
+    if crs is None:
+        return None
+    if crs.is_geographic:
+        return "degree"
+    units = str(crs.linear_units or "unknown").lower()
+    return "metre" if units in {"metre", "meter", "m", "metres", "meters"} else units
+
+
+def _ground_gsd_m(transform, height: int) -> tuple[float, float]:
+    """Approximate ground pixel size in metres for a geographic grid.
+
+    Uses WGS84 metres-per-degree at the grid's centre latitude. At 54.7 N a
+    "10 m" 0.0000898-degree pixel is about 5.8 m east-west by 10 m north-south:
+    square in degrees, not on the ground.
+    """
+    lat = math.radians(transform.f + transform.e * height / 2.0)
+    m_lat = 111132.954 - 559.822 * math.cos(2 * lat) + 1.175 * math.cos(4 * lat)
+    m_lon = (111412.84 * math.cos(lat) - 93.5 * math.cos(3 * lat)
+             + 0.118 * math.cos(5 * lat))
+    return round(abs(transform.a) * m_lon, 3), round(abs(transform.e) * m_lat, 3)
+
+
+def _invalid_fraction(
+    src, max_pixels: int = 4_000_000, assumed_nodata: float | None = None,
+) -> dict[str, Any]:
     """Fraction of pixels that are nodata or non-finite, across every band.
 
     Every band is inspected, one at a time so that a 200-band hyperspectral
@@ -109,37 +142,62 @@ def _invalid_fraction(src, max_pixels: int = 4_000_000) -> dict[str, Any]:
     counts so that the report can say which it is. Note that rasterio may serve
     a decimated read from internal overviews, whose resampling can blur nodata
     edges; treat estimates near a threshold with suspicion.
+
+    ``assumed_nodata`` is a caller-declared fill value, used only for bands whose
+    file declares none; ``nodata_source`` in the sampling record says which was
+    used. When no band has a nodata value at all, ``zero_fill_fraction`` reports
+    the pixels that are exactly zero in every band. The real Sentinel-2
+    embeddings this was written against left 40% of a tile as zero vectors with
+    no nodata tag, and were measured as 0% invalid. Zero is not always fill, so
+    this is evidence for the quality gate to weigh, not a count of invalid pixels.
+    ``value_range`` is the (min, max) over valid pixels of all bands.
     """
     h, w = src.height, src.width
     step = max(1, int(math.sqrt((h * w) / max_pixels)))
     shape = (max(1, h // step), max(1, w // step))
     total = shape[0] * shape[1]
+    file_nodata = [v for v in src.nodatavals if v is not None]
     sampling = {
         "decimation_step": step,
         "pixels_read": total,
         "pixels_total": h * w,
         "estimated": step > 1,
+        "nodata_source": "file" if file_nodata else (
+            "declared" if assumed_nodata is not None else None),
     }
     if total == 0 or src.count == 0:
-        return {"invalid_fraction": 1.0, "invalid_fraction_by_band": [], **sampling}
+        return {"invalid_fraction": 1.0, "invalid_fraction_by_band": [],
+                "value_range": None, **sampling}
 
     any_bad = np.zeros(shape, dtype=bool)
+    all_zero = np.ones(shape, dtype=bool)
     by_band: list[float] = []
+    lo, hi = math.inf, -math.inf
     for b in range(1, src.count + 1):
         data = src.read(b, out_shape=shape)
         nodata = src.nodatavals[b - 1]
+        if nodata is None:
+            nodata = assumed_nodata
         bad = np.zeros(shape, dtype=bool)
         if nodata is not None and not (isinstance(nodata, float) and math.isnan(nodata)):
             bad |= data == nodata
         if np.issubdtype(data.dtype, np.floating):
             bad |= ~np.isfinite(data)     # a mask, so non-finite nodata is not counted twice
         any_bad |= bad
+        all_zero &= data == 0
         by_band.append(round(float(bad.mean()), 6))
-    return {
+        valid = data[~bad]
+        if valid.size:
+            lo, hi = min(lo, float(valid.min())), max(hi, float(valid.max()))
+    out = {
         "invalid_fraction": round(float(any_bad.mean()), 6),
         "invalid_fraction_by_band": by_band,
+        "value_range": [lo, hi] if lo <= hi else None,
         **sampling,
     }
+    if sampling["nodata_source"] is None:
+        out["zero_fill_fraction"] = round(float(all_zero.mean()), 6)
+    return out
 
 
 def _same(key: str, observed: Any, declared: Any) -> bool:
@@ -206,7 +264,13 @@ def describe(
     differs from the file's, for instance — the observed value wins and the
     disagreement is recorded in ``provenance.conflicts``. Silently preferring
     the declaration would reintroduce exactly the failure this module exists to
-    prevent.
+    prevent. The one exception is ``nodata`` when the file declares none: a
+    declared fill value then fills a gap rather than contradicting a
+    measurement, so it is used for the invalid-fraction pass and recorded as
+    declared, while ``nodata`` itself stays the observed ``None``.
+
+    ``gsd`` is in the CRS's units, named in ``gsd_units``. For a geographic CRS
+    that is degrees, and ``gsd_ground_m`` gives the approximate ground size.
 
     ``invalid_fraction`` covers every band (a pixel counts as invalid if any
     band is invalid there), with per-band figures in
@@ -222,12 +286,14 @@ def describe(
     layer: dict[str, Any] = {"name": name or path.stem, "path": str(path)}
 
     with rasterio.open(path) as src:
+        units = _gsd_units(src.crs)
         obs: dict[str, Any] = {
             "crs": str(src.crs) if src.crs else None,
             "transform": tuple(src.transform)[:6],
             "width": src.width,
             "height": src.height,
             "gsd": float(abs(src.transform.a)),
+            "gsd_units": units,
             "dtype": src.dtypes[0],
             "nodata": src.nodata,
             "band_count": src.count,
@@ -239,16 +305,34 @@ def describe(
                 f"({abs(src.transform.a)} x {abs(src.transform.e)}); "
                 "gsd reports the x dimension only"
             )
+        if units == "degree":
+            gx, gy = _ground_gsd_m(src.transform, src.height)
+            obs["gsd_ground_m"] = [gx, gy]
+            if not math.isclose(gx, gy, rel_tol=0.01):
+                prov.conflicts.append(
+                    f"{layer['name']}: geographic CRS; gsd is in degrees, and pixels are "
+                    f"about {gx:g} m x {gy:g} m on the ground at this latitude, not square"
+                )
+        # A declared fill value is used only where the file declares none:
+        # that fills a gap in the file's metadata rather than contradicting it.
+        assumed = declared.get("nodata") if src.nodata is None else None
         if read_stats:
-            stats = _invalid_fraction(src, max_pixels=max_stat_pixels)
+            stats = _invalid_fraction(src, max_pixels=max_stat_pixels,
+                                      assumed_nodata=assumed)
             obs["invalid_fraction"] = stats.pop("invalid_fraction")
             obs["invalid_fraction_by_band"] = stats.pop("invalid_fraction_by_band")
+            obs["value_range"] = stats.pop("value_range")
+            if "zero_fill_fraction" in stats:
+                obs["zero_fill_fraction"] = stats.pop("zero_fill_fraction")
             obs["invalid_fraction_sampling"] = stats
         layer.update(obs)
         prov.observed = obs
 
     # declared fields: record, and flag anything that contradicts the file
     for key, value in declared.items():
+        if key == "nodata" and prov.observed.get("nodata") is None:
+            prov.declared[key] = value       # file is silent; recorded as an assertion
+            continue
         if key in OBSERVABLE and key in prov.observed:
             if not _same(key, prov.observed[key], value):
                 prov.conflicts.append(

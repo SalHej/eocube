@@ -1,0 +1,138 @@
+# Chlorophyll-a in Baltic lakes — Sentinel-2 vs in-situ match-ups, regression.
+#
+#   python experiments/run_ablation.py --config experiments/configs/chlorophyll.yaml --dry-run
+#
+# Fully open data, so this is the study that can start first. The rasters still
+# live on VU HPC: CLAUDE.md rule 1 is "never copy EO raster data to this machine",
+# not only the licensed scenes.
+#
+# PUBLISHED BASELINE: not available. None was given with the dataset; record one
+# here (value, metric, split, doi) before claiming an improvement over anything.
+#
+# EVERY value marked PLACEHOLDER must be replaced before a real run; placeholders
+# fail loudly (missing paths -> ConfigError, PLACEHOLDER dates -> ValueError).
+
+study: chlorophyll-baltic-lakes
+
+data_root: /scratch/lustre/projects/hpc_project_a1fb2511d81f42fba1f872930bb56828/data
+
+# In-situ sampling time, including time of day if recorded. One target time per
+# study: match-ups from several dates need one config per date, or a runner change.
+target_time: "PLACEHOLDER_YYYY-MM-DD"
+
+# Candidate bands, not a published selection: B03 green, B04 red (665 nm), B05 red
+# edge (705 nm) carry most of the chlorophyll-a signal in turbid inland water; B02
+# helps separate CDOM and sediment. Confirm against the method you replicate.
+#
+# Reflectance: declare true only after an atmospheric correction suited to inland
+# water. Sen2Cor L2A is designed for land; water-specific processors (e.g. ACOLITE,
+# C2RCC, POLYMER) are the usual choice over lakes. Which one was used must be
+# recorded; reflectance false gives a recorded decision, not a refusal.
+#
+# QA: L2A ships a scene classification layer (cloud, shadow, water), so a mask is
+# available and must be applied. qa_mask_applied false refuses until it is.
+# Mask CLOUD and SHADOW to nodata, NOT land: invalid_fraction is computed over the
+# whole raster, so masking land would put a lake scene far above any threshold.
+# Land pixels carry no target, so they never become samples anyway.
+layers:
+  - name: S2_B02
+    path: "PLACEHOLDER/s2_b02.tif"
+    source: S2
+    acquisitions: ["PLACEHOLDER_YYYY-MM-DD"]
+    declared: {modality: optical, reflectance: false,
+               qa_mask_available: true, qa_mask_applied: false}
+  - name: S2_B03
+    path: "PLACEHOLDER/s2_b03.tif"
+    source: S2
+    acquisitions: ["PLACEHOLDER_YYYY-MM-DD"]
+    declared: {modality: optical, reflectance: false,
+               qa_mask_available: true, qa_mask_applied: false}
+  - name: S2_B04
+    path: "PLACEHOLDER/s2_b04.tif"
+    source: S2
+    acquisitions: ["PLACEHOLDER_YYYY-MM-DD"]
+    declared: {modality: optical, reflectance: false,
+               qa_mask_available: true, qa_mask_applied: false}
+  - name: S2_B05                 # 20 m: the resolution gate will record B02-B04 being
+    path: "PLACEHOLDER/s2_b05.tif"   # downsampled from 10 m to 20 m
+    source: S2
+    acquisitions: ["PLACEHOLDER_YYYY-MM-DD"]
+    declared: {modality: optical, reflectance: false,
+               qa_mask_available: true, qa_mask_applied: false}
+
+# In-situ chlorophyll-a rasterised onto the S2 grid, NaN everywhere without a sample.
+# Units are usually mg/m3 (= µg/L); confirm. Chlorophyll-a is roughly log-normal and
+# R² on log10(chl-a) is not comparable to R² on chl-a. Decide which upstream, write
+# the raster accordingly, and state it next to any result. The runner applies none.
+target:
+  path: "PLACEHOLDER/target_chla.tif"
+  band: 1
+
+model:
+  name: rf                       # CPU only; no GPU-hours
+  params: {n_estimators: 300, n_jobs: 8}
+
+metric: r2
+
+seeds: [0, 1, 2]                 # minimum; scripts/train.sbatch overrides with --seeds 5
+
+# Match-up points within one lake are strongly autocorrelated, so the test set should
+# hold out whole lakes. The block grid only approximates that: an 8x8 grid can cut a
+# large lake in two and put one half in each fold, and can merge small lakes. A
+# per-lake split is not available in the runner yet. GUESS: 8 kept as the library
+# default; with a few dozen match-ups many blocks will be empty.
+split:
+  n_blocks: 8
+  test_fraction: 0.25
+  exclude_synthetic_from_test: true
+
+samples:
+  gap_filled_layers: []
+
+gates:
+  require_identical_crs: true
+  max_grid_offset_px: 0.1        # bands of one S2 product share a grid; a failure here
+                                 # means resampling went wrong upstream
+  target_gsd: null               # coarsest input (20 m with B05), nothing upsampled
+  allow_upsampling: false
+  resampling: bilinear
+
+  # TEMPORAL — tighter than peatland. Blooms can change surface chlorophyll-a
+  # severalfold within days, and wind redistributes surface scum within hours, so a
+  # match-up a week apart is not a match-up. 1 day: GUESS. Published inland-water
+  # validation work uses windows from same-day to a few days; I have not checked a
+  # specific reference. The gate keeps and flags a scene outside the window rather
+  # than dropping it, so tightening costs nothing but visibility.
+  window_days: 1.0
+  decay_alpha: null              # no weighting; none is published for this dataset
+  # True refuses any S2 scene after the sampling time. For retrieval (not
+  # forecasting) a symmetric +/- match-up window is standard practice, and a scene
+  # the day after sampling is not leakage in the forecasting sense. Kept true as
+  # the conservative default; switching it off needs a sentence of justification.
+  forbid_future: true
+
+  # Library default. Baltic summer scenes are often cloudy; above 30% the layer is
+  # refused because gap-filling reflectance over water would fabricate the signal
+  # being predicted.
+  max_invalid_fraction: 0.30
+  gap_fill: null
+
+  # The red-edge ratio is a standard chlorophyll-a feature. The gate checks that it
+  # mixes no radar and no dB layers; the runner does not compute it as a feature.
+  band_expressions: ["S2_B05 / S2_B04"]
+  require_terrain_correction: true   # no SAR layers; has no effect here
+
+ablation:
+  # Every gate can run: all layers are optical and timed.
+  gates: [geometry_crs, resolution, temporal_alignment, quality_missingness, sensor_physics]
+  train_on_refused: true
+  # No variants until the files exist; until then deltas are zero by construction.
+  # The most informative one here would be quality_missingness: the same scene with
+  # the cloud mask not applied.
+  #   quality_missingness:
+  #     S2_B04:
+  #       path: "PLACEHOLDER/s2_b04_unmasked.tif"
+  #       declared: {qa_mask_applied: false}
+  variants: {}
+
+output: results/chlorophyll.json

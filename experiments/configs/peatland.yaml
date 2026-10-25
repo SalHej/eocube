@@ -1,0 +1,227 @@
+# Peatland soil moisture, Ežerėlis — asynchronous multi-sensor regression.
+#
+#   python experiments/run_ablation.py --config experiments/configs/peatland.yaml --dry-run
+#
+# Runs on VU HPC only. TerraSAR-X and EnMAP are licensed to third parties and must
+# never leave the cluster (CLAUDE.md, hard rule 1). Run it through scripts/train.sbatch.
+#
+# PUBLISHED BASELINE, to judge a run against:
+#   R² = 0.73   radar + weather (S1, TSX, meteorology)
+#   R² = 0.81   radar + weather + EnMAP
+#   Source: as reported to the author; primary paper and doi still to be recorded
+#   here (CLAUDE.md lists doi:10.31223/X5TN59, the preprint, which is not that paper).
+#   The comparison is approximate until the split matches theirs: a spatial-block
+#   R² is expected to be lower than a random-split R² on the same data.
+#
+# EVERY value marked PLACEHOLDER or UNVERIFIED must be replaced before a real run.
+# Placeholders are chosen so the run fails loudly rather than proceeding:
+#   - paths beginning PLACEHOLDER/ do not exist        -> ConfigError
+#   - dates reading PLACEHOLDER_YYYY-MM-DD do not parse -> ValueError
+#   - EnMAP layers have no 'band'                      -> ConfigError on a multi-band file
+#   - SAR 'units: UNVERIFIED' / 'calibrated: false'     -> sensor_physics refuses
+#   - EnMAP 'qa_mask_applied: false'                   -> quality_missingness refuses
+#
+# ---------------------------------------------------------------------------------
+# PATHS: nothing outside the cluster project directory.
+#
+# data_root is the project directory on VU HPC. Every layer, target and variant path
+# below MUST be relative to it: no absolute paths, no '..'. The runner joins a
+# relative path to data_root but uses an absolute path as given, so an absolute
+# path here would bypass the root entirely. Why it matters: this study reads
+# licensed TerraSAR-X and EnMAP scenes, and a config that can name /home, a laptop
+# mount or a sync folder is one copy away from moving licensed data off the cluster.
+# The runner itself does not enforce this; tests/test_experiment_configs.py does,
+# on this file, so a path that escapes the root fails CI before it reaches a job.
+# ---------------------------------------------------------------------------------
+
+study: peatland-ezerelis
+
+data_root: /scratch/lustre/projects/hpc_project_a1fb2511d81f42fba1f872930bb56828/data
+
+# The in-situ soil-moisture measurement time. The runner supports ONE target time per
+# study; a campaign with several measurement dates needs one config (and one target
+# raster) per date, or a runner change. Include the time of day if probes log it.
+target_time: "PLACEHOLDER_YYYY-MM-DD"
+
+layers:
+  # --- Sentinel-1 C-band SAR (IW GRD) -------------------------------------------
+  # Required processing before declaring calibrated/terrain_corrected true:
+  # orbit file, thermal-noise removal, radiometric calibration (sigma0, or beta0 then
+  # terrain flattening to gamma0), Range-Doppler terrain correction. GRD as
+  # distributed is NOT calibrated backscatter.
+  # units: S1 products are very often exported in dB. Declare what the FILE holds.
+  # If it is dB, any band arithmetic in band_expressions using + or - is refused.
+  # Note the resolution gate sees pixel spacing (10 m for GRD), not the ~20 m
+  # native resolution.
+  - name: S1_VV
+    path: "PLACEHOLDER/s1_vv.tif"
+    source: S1
+    acquisitions: ["PLACEHOLDER_YYYY-MM-DD"]   # every S1 date in the conditioning window
+    declared:
+      modality: sar
+      units: UNVERIFIED        # REQUIRED: 'linear' or 'db', read from the processing log
+      calibrated: false        # set true only once sigma0/gamma0 calibration is confirmed
+      terrain_corrected: false # set true only once terrain flattening + RD-TC is confirmed
+  - name: S1_VH
+    path: "PLACEHOLDER/s1_vh.tif"
+    source: S1
+    acquisitions: ["PLACEHOLDER_YYYY-MM-DD"]
+    declared:
+      modality: sar
+      units: UNVERIFIED
+      calibrated: false
+      terrain_corrected: false
+
+  # --- TerraSAR-X X-band SAR (LICENSED, cluster only) ---------------------------
+  # Polarisation not known yet; rename the layer (e.g. TSX_HH) once it is.
+  # Product level matters: SSC/MGD are not geocoded; EEC is geocoded with a DEM but
+  # that is geometric correction only. Backscatter still needs calibration with the
+  # product's calibration constant and conversion beta0 -> sigma0 using the local
+  # incidence angle. Declare terrain_corrected true only when the incidence-angle
+  # (radiometric) correction has been applied, not merely the geocoding. The
+  # peatland is flat, but TSX scenes from different incidence angles are still not
+  # comparable without it.
+  - name: TSX_X
+    path: "PLACEHOLDER/tsx.tif"
+    source: TSX
+    acquisitions: ["PLACEHOLDER_YYYY-MM-DD"]
+    declared:
+      modality: sar
+      units: UNVERIFIED
+      calibrated: false
+      terrain_corrected: false
+
+  # --- EnMAP hyperspectral (LICENSED, cluster only) -----------------------------
+  # The runner takes one band per layer. Add one entry per band used; quietly
+  # taking band 1 of the cube is refused. Band indices are not chosen here because
+  # the published band selection is not known to me.
+  # Reflectance: declare true only for an L2A surface-reflectance product.
+  # EnMAP L2A ships cloud / haze / cloud-shadow masks, so a mask is available and
+  # must be applied: qa_mask_applied false refuses until it has been.
+  - name: ENMAP_BAND_A
+    path: "PLACEHOLDER/enmap_l2a.tif"
+    # band: PLACEHOLDER        # REQUIRED: 1-based band index in the file
+    source: ENMAP
+    acquisitions: ["PLACEHOLDER_YYYY-MM-DD"]
+    declared:
+      modality: hyperspectral
+      reflectance: false       # set true once confirmed L2A surface reflectance
+      qa_mask_available: true
+      qa_mask_applied: false   # set true once cloud/haze/shadow pixels are nodata
+  - name: ENMAP_BAND_B
+    path: "PLACEHOLDER/enmap_l2a.tif"
+    # band: PLACEHOLDER
+    source: ENMAP
+    acquisitions: ["PLACEHOLDER_YYYY-MM-DD"]
+    declared:
+      modality: hyperspectral
+      reflectance: false
+      qa_mask_available: true
+      qa_mask_applied: false
+
+  # --- Meteorology --------------------------------------------------------------
+  # Variables are candidates, not the published set: confirm which were used.
+  # Acquisitions are listed so the temporal gate checks them for leakage too:
+  # rainfall recorded after the soil-moisture measurement is as much leakage as a
+  # radar scene acquired after it.
+  - name: MET_PRECIP
+    path: "PLACEHOLDER/met_precip.tif"
+    source: MET
+    acquisitions: ["PLACEHOLDER_YYYY-MM-DD"]
+    declared:
+      modality: meteorological
+  - name: MET_AIR_T
+    path: "PLACEHOLDER/met_air_temperature.tif"
+    source: MET
+    acquisitions: ["PLACEHOLDER_YYYY-MM-DD"]
+    declared:
+      modality: meteorological
+
+# In-situ soil moisture rasterised onto the cube grid, NaN where there is no probe.
+# Units (volumetric %, m3/m3) are not known yet; record them here.
+target:
+  path: "PLACEHOLDER/target_soil_moisture.tif"
+  band: 1
+
+# Random forest: CPU only, so a run costs CPU-hours from the 6,000, not GPU-hours.
+# The published model is not known to me; this is a baseline, not a replication.
+model:
+  name: rf
+  params: {n_estimators: 300, n_jobs: 8}   # n_jobs matches --cpus-per-task in train.sbatch
+
+metric: r2                       # the published baselines are R²
+
+seeds: [0, 1, 2]                 # minimum; scripts/train.sbatch overrides with --seeds 5
+
+# Block side = scene extent / n_blocks. It should exceed the spatial autocorrelation
+# range of soil moisture at the site, which is not known until a variogram is fitted
+# to the probe data. 8 is the library default, kept until then. With sparse probes,
+# many blocks will be empty and a test fold may hold fewer than 5 samples, in which
+# case that run scores NaN rather than a misleading number.
+split:
+  n_blocks: 8
+  test_fraction: 0.25
+  exclude_synthetic_from_test: true
+
+samples:
+  gap_filled_layers: []
+
+gates:
+  require_identical_crs: true
+  max_grid_offset_px: 0.1        # library default; S1, TSX and EnMAP must be co-registered
+                                 # upstream, and this checks that they were
+  # null: the coarsest input sets the grid, so nothing is upsampled. GUESS / OPEN:
+  # if the meteorology is a km-scale raster (reanalysis), "coarsest" collapses the
+  # cube to that grid. Setting 30 (EnMAP) would instead refuse unless upsampling of
+  # the meteorology is allowed and justified. Needs a decision, not a default.
+  target_gsd: null
+  allow_upsampling: false
+  resampling: bilinear
+
+  # TEMPORAL — the case this gate exists for. 7 days: with S1 ascending and
+  # descending passes over Lithuania there is usually a C-band scene within a few
+  # days of any date, and peat moisture changes more slowly than mineral-soil
+  # moisture between rain events. TSX and EnMAP are tasked and cloud-limited, so
+  # they will often fall outside 7 d; the gate keeps and flags them, it does not
+  # drop them, which is the asynchronous situation the study is about.
+  # GUESS: 7 d is a judgement, not derived from the site's moisture dynamics.
+  window_days: 7.0
+  # null: no time-decay weight recorded. The published formulation uses
+  # exp(-alpha*|dt|), but I do not know its alpha; take it from the paper rather
+  # than inventing one.
+  decay_alpha: null
+  forbid_future: true            # any acquisition after target_time refuses: leakage
+
+  max_invalid_fraction: 0.30     # library default; SAR rarely has gaps, EnMAP is
+                                 # cloud-limited and is what this will bite on
+  # GAP-FILLING IS OFF, deliberately. With gap_fill null a layer above the invalid
+  # threshold is refused, not repaired. The study's question is whether asynchronous
+  # radar + hyperspectral fusion predicts soil moisture; a filled EnMAP or TSX pixel
+  # is a value the gap-filler produced, not one the sensor observed, and scoring on
+  # it measures the filler. If filling is ever enabled it must be justified in the
+  # write-up, the filled layers listed in samples.gap_filled_layers, and the filled
+  # pixels kept out of the test set.
+  gap_fill: null
+
+  # Any arithmetic the feature engineering performs. Empty until it is known.
+  # e.g. a cross-pol ratio "S1_VH / S1_VV" (valid in linear; in dB it becomes a
+  # difference and is refused). Never mix S1_*/TSX_* with ENMAP_* in one term.
+  band_expressions: []
+  require_terrain_correction: true
+
+ablation:
+  gates: [geometry_crs, resolution, temporal_alignment, quality_missingness, sensor_physics]
+  train_on_refused: true
+  # No variants yet: each needs a real raster, built without that gate. Until then
+  # the arms train on the baseline files and their deltas are zero by construction
+  # (the runner says so in its warnings). Paths must be relative to data_root.
+  # Example shape, do not uncomment until the file exists:
+  #   temporal_alignment:
+  #     S1_VV:
+  #       path: "PLACEHOLDER/s1_vv_including_post_target_scene.tif"
+  #       acquisitions: ["PLACEHOLDER_YYYY-MM-DD", "PLACEHOLDER_YYYY-MM-DD"]
+  variants: {}
+
+# Relative to the repo checkout, which on the cluster is $PROJECT/eocube.
+# scripts/train.sbatch passes --out results/ablation-<jobid>.json, which overrides this.
+output: results/peatland.json

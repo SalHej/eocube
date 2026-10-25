@@ -1,0 +1,102 @@
+# Solar panel segmentation — aerial / satellite imagery, 0.8 to 0.1 m GSD.
+#
+# NOT RUNNABLE YET, on purpose. This is a segmentation task and the runner offers
+# only regression metrics (r2, neg_rmse). 'metric: iou' below makes the runner stop
+# with a config error instead of training a pixel regressor on a binary mask and
+# printing an R² that could be mistaken for comparable to the published IoU.
+# What has to change first is in experiments/README.md, "Solar panel: what the
+# pipeline needs before segmentation".
+#
+# PUBLISHED BASELINE, to judge a run against:
+#   IoU = 83.32%, with a 60% synthetic augmentation ratio chosen by manual
+#   sensitivity analysis. Source doi not recorded here yet; add it.
+#   Note: that synthetic share is TRAINING augmentation. Synthetic images must
+#   never be in the test set. The runner's 'exclude_synthetic_from_test' refers to
+#   gap-filled pixels, a different thing, and does not cover augmentation.
+#
+# Placeholders are marked PLACEHOLDER and fail loudly.
+
+study: solar-panel-segmentation
+
+data_root: /scratch/lustre/projects/hpc_project_a1fb2511d81f42fba1f872930bb56828/data
+
+# No target_time and no acquisitions: this is a single-date task. Each tile is one
+# image and its label was drawn on that image, so there is no compositing window
+# and no future scene to leak. The temporal gate does not run, and is left out of
+# the ablation below so it does not report an arm identical to the baseline.
+# If labels ever come from a different date than the imagery (e.g. a cadastral
+# register), that assumption breaks and the gate should come back.
+
+# A 0.8 to 0.1 m range suggests the dataset has subsets at different GSDs. One
+# config per GSD subset is the conservative reading: mixing them in one study would
+# make the resolution gate resample the finer tiles to the coarsest.
+#
+# RGB as three layers from one file, because the runner takes one band per layer.
+# Reflectance false: aerial RGB is usually 8-bit display DN, not surface
+# reflectance. GUESS; check the metadata. It gives a recorded decision, not a
+# refusal. Add a NIR layer if the imagery has one.
+layers:
+  - name: RGB_R
+    path: "PLACEHOLDER/tile_rgb.tif"
+    band: 1
+    declared: {modality: optical, reflectance: false}
+  - name: RGB_G
+    path: "PLACEHOLDER/tile_rgb.tif"
+    band: 2
+    declared: {modality: optical, reflectance: false}
+  - name: RGB_B
+    path: "PLACEHOLDER/tile_rgb.tif"
+    band: 3
+    declared: {modality: optical, reflectance: false}
+
+# Binary panel mask on the image grid: 1 panel, 0 background, nodata unlabelled.
+# The target is not a layer, so the geometry gate never checks it against the
+# imagery; the runner's pre-flight only checks CRS and that extents agree to within
+# one target pixel. At 0.1 m, a one-pixel label shift is a large share of a small
+# panel's IoU. Verify label registration upstream.
+target:
+  path: "PLACEHOLDER/tile_mask.tif"
+  band: 1
+
+model:
+  name: rf                       # placeholder only: a pixel-wise regressor is not
+  params: {n_estimators: 300, n_jobs: 8}   # the published model, which is not known to me
+
+metric: iou                      # not supported by the runner yet; refuses on purpose
+
+seeds: [0, 1, 2]
+
+# Splitting must be by tile (or by tile cluster), never by pixel: neighbouring tiles
+# from the same rooftop or solar farm are near-duplicates. The spatial block split
+# over one tile's pixels does not express that. Defaults kept until a tile-level
+# split exists.
+split:
+  n_blocks: 8
+  test_fraction: 0.25
+  exclude_synthetic_from_test: true
+
+samples:
+  gap_filled_layers: []
+
+gates:
+  require_identical_crs: true
+  # Library default, in reference pixels. At 0.1 m GSD that is 1 cm, at 0.8 m 8 cm.
+  max_grid_offset_px: 0.1
+  target_gsd: null
+  allow_upsampling: false
+  resampling: bilinear
+  # Temporal gate keys omitted: it does not run without acquisitions.
+  # GUESS: tighter than the 0.30 default. Orthophoto tiles should be nearly
+  # complete; missing pixels are mostly tile edges, and a hole inside a tile can
+  # hide a panel the mask says is there.
+  max_invalid_fraction: 0.10
+  gap_fill: null                 # filling imagery under a panel mask would invent panels
+  band_expressions: []
+  require_terrain_correction: true   # no SAR layers; has no effect here
+
+ablation:
+  gates: [geometry_crs, resolution, quality_missingness, sensor_physics]
+  train_on_refused: true
+  variants: {}
+
+output: results/solar_panel.json

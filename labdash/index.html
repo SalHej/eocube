@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Lab dashboard</title>
+<style>
+:root{
+  color-scheme: light;
+  --bg:#f6f7f9; --panel:#fff; --ink:#15181d; --dim:#636b78; --line:#e2e6ec;
+  --accent:#2a5db0; --ok:#1f7a43; --warn:#9a6700; --bad:#b32d2e;
+  --okbg:#e8f5ee; --warnbg:#fdf6e3; --badbg:#fdeded; --mono:ui-monospace,"Cascadia Mono",Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    color-scheme: dark;
+    --bg:#101317; --panel:#171b21; --ink:#e6e9ee; --dim:#9099a6; --line:#262c35;
+    --accent:#6ea8ff; --ok:#56d391; --warn:#e3b341; --bad:#ff7b72;
+    --okbg:#132a1e; --warnbg:#2b2411; --badbg:#2d1618;
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme: dark;
+  --bg:#101317; --panel:#171b21; --ink:#e6e9ee; --dim:#9099a6; --line:#262c35;
+  --accent:#6ea8ff; --ok:#56d391; --warn:#e3b341; --bad:#ff7b72;
+  --okbg:#132a1e; --warnbg:#2b2411; --badbg:#2d1618;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
+  font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+:root{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+header{position:sticky;top:env(safe-area-inset-top,0px);z-index:10;background:var(--panel);
+  border-bottom:1px solid var(--line);padding:10px 16px;display:flex;
+  align-items:center;gap:14px;flex-wrap:wrap}
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);
+  background:var(--panel);z-index:11}
+h1{font-size:15px;margin:0;font-weight:650;letter-spacing:-.01em}
+.sub{color:var(--dim);font-size:12px}
+.spacer{flex:1}
+button{font:inherit;background:var(--panel);color:var(--ink);border:1px solid var(--line);
+  border-radius:7px;padding:5px 11px;cursor:pointer}
+button:hover{border-color:var(--accent)}
+button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+button:disabled{opacity:.5;cursor:default}
+main{padding:16px;display:grid;gap:14px;
+  grid-template-columns:repeat(auto-fit,minmax(340px,1fr));max-width:1680px;margin:0 auto}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:11px;overflow:hidden}
+.panel.wide{grid-column:1/-1}
+.ph{padding:10px 14px;border-bottom:1px solid var(--line);display:flex;
+  align-items:center;gap:9px}
+.ph h2{font-size:13px;margin:0;font-weight:620;text-transform:uppercase;
+  letter-spacing:.055em;color:var(--dim)}
+.pb{padding:14px}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--dim);flex:none}
+.dot.ok{background:var(--ok)} .dot.bad{background:var(--bad)} .dot.warn{background:var(--warn)}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:5px 14px;font-size:13px}
+.kv dt{color:var(--dim)} .kv dd{margin:0;font-variant-numeric:tabular-nums}
+.mono{font-family:var(--mono);font-size:12px}
+.note{color:var(--dim);font-size:12.5px;margin:0}
+.pill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11.5px;
+  border:1px solid var(--line)}
+.pill.ok{background:var(--okbg);color:var(--ok);border-color:transparent}
+.pill.bad{background:var(--badbg);color:var(--bad);border-color:transparent}
+.pill.warn{background:var(--warnbg);color:var(--warn);border-color:transparent}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th,td{text-align:left;padding:5px 9px;border-bottom:1px solid var(--line);
+  font-variant-numeric:tabular-nums}
+th{color:var(--dim);font-weight:560;font-size:11.5px;text-transform:uppercase;
+  letter-spacing:.04em}
+td.num,th.num{text-align:right}
+.scroll{overflow-x:auto}
+pre{margin:0;padding:11px;background:var(--bg);border:1px solid var(--line);
+  border-radius:8px;overflow:auto;max-height:340px;font-family:var(--mono);
+  font-size:12px;white-space:pre-wrap;word-break:break-word}
+.bar{height:7px;background:var(--line);border-radius:4px;overflow:hidden;margin-top:4px}
+.bar>i{display:block;height:100%;background:var(--accent)}
+.bar>i.warn{background:var(--warn)} .bar>i.bad{background:var(--bad)}
+.cmds{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:11px}
+select,input{font:inherit;background:var(--panel);color:var(--ink);
+  border:1px solid var(--line);border-radius:7px;padding:5px 8px;max-width:100%}
+.flex{display:flex;gap:9px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+.muted{color:var(--dim)}
+.delta-neg{color:var(--bad)} .delta-pos{color:var(--ok)}
+.empty{color:var(--dim);font-size:13px;padding:6px 0}
+.chatlog{max-height:460px;overflow-y:auto;display:flex;flex-direction:column;gap:9px}
+.msg{padding:8px 11px;border-radius:9px;max-width:92%;white-space:pre-wrap;
+  word-break:break-word;font-size:13.5px;line-height:1.55}
+.msg.user{background:var(--accent);color:#fff;align-self:flex-end}
+.msg.bot{background:var(--bg);border:1px solid var(--line)}
+.msg.tool{background:var(--bg);border:1px dashed var(--line);font-family:var(--mono);
+  font-size:11.5px;color:var(--dim);align-self:stretch}
+.msg.tool.blocked{border-color:var(--bad);color:var(--bad)}
+.appr{background:var(--warnbg);border:1px solid var(--warn);border-radius:9px;
+  padding:11px;margin-top:10px}
+.appr h4{margin:0 0 7px;font-size:12.5px;color:var(--warn);
+  text-transform:uppercase;letter-spacing:.04em}
+.appr pre{max-height:190px;margin:5px 0}
+.thinking{color:var(--dim);font-style:italic;font-size:13px}
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="hdot"></span>
+  <h1 id="title">dashboard</h1>
+  <span class="sub" id="subtitle"></span>
+  <span class="spacer"></span>
+  <span class="sub" id="stamp"></span>
+  <button onclick="refreshAll()">Refresh</button>
+  <button onclick="toggleTheme()" title="Toggle theme">◐</button>
+</header>
+
+<main>
+  <section class="panel">
+    <div class="ph"><span class="dot" id="d-repo"></span><h2>Repository</h2></div>
+    <div class="pb" id="p-repo"><p class="empty">loading…</p></div>
+  </section>
+
+  <section class="panel">
+    <div class="ph"><span class="dot" id="d-hpc"></span><h2>HPC connection</h2></div>
+    <div class="pb" id="p-hpc"><p class="empty">loading…</p></div>
+  </section>
+
+  <section class="panel">
+    <div class="ph"><span class="dot" id="d-alloc"></span><h2>Allocation</h2></div>
+    <div class="pb" id="p-alloc"><p class="empty">loading…</p></div>
+  </section>
+
+  <section class="panel">
+    <div class="ph"><span class="dot" id="d-tests"></span><h2>Tests</h2></div>
+    <div class="pb" id="p-tests"><p class="empty">not run yet</p></div>
+  </section>
+
+  <section class="panel wide">
+    <div class="ph"><span class="dot" id="d-jobs"></span><h2>Slurm jobs</h2></div>
+    <div class="pb" id="p-jobs"><p class="empty">loading…</p></div>
+  </section>
+
+  <section class="panel wide">
+    <div class="ph"><span class="dot ok"></span><h2>Results</h2></div>
+    <div class="pb">
+      <div class="flex">
+        <select id="resultSel" onchange="loadResult()"><option>—</option></select>
+        <span class="sub" id="resultMeta"></span>
+      </div>
+      <div id="p-result"><p class="empty">no results yet</p></div>
+    </div>
+  </section>
+
+  <section class="panel wide">
+    <div class="ph"><span class="dot" id="d-chat"></span><h2>Assistant</h2>
+      <span class="spacer"></span>
+      <select id="modelSel" onchange="setModel()" style="font-size:12px"></select>
+      <span class="sub" id="costTag"></span>
+      <button onclick="resetChat()" style="font-size:12px">New</button>
+    </div>
+    <div class="pb">
+      <div id="chatLog" class="chatlog"><p class="empty">Ask something. Read-only
+        actions run immediately; anything that changes state waits for your
+        approval.</p></div>
+      <div id="approvals"></div>
+      <div class="flex" style="margin:10px 0 0">
+        <textarea id="chatIn" rows="2" placeholder="e.g. run the tests and tell me what fails"
+          style="flex:1;min-width:240px;font:inherit;background:var(--panel);
+          color:var(--ink);border:1px solid var(--line);border-radius:7px;padding:7px"
+          onkeydown="if(event.key==='Enter'&&(event.ctrlKey||event.metaKey))sendChat()"></textarea>
+        <button class="primary" id="sendBtn" onclick="sendChat()">Send</button>
+      </div>
+      <p class="note" style="margin-top:7px">Ctrl+Enter sends. Costs are billed
+        to your Anthropic API account, separately from a Claude subscription.</p>
+    </div>
+  </section>
+
+  <section class="panel wide">
+    <div class="ph"><span class="dot ok"></span><h2>Commands</h2></div>
+    <div class="pb">
+      <div class="cmds" id="cmdButtons"></div>
+      <p class="note" id="cmdNote">Declared commands only. Add more in the config file.</p>
+      <pre id="cmdOut">—</pre>
+    </div>
+  </section>
+
+  <section class="panel wide">
+    <div class="ph"><span class="dot ok"></span><h2>Logs</h2></div>
+    <div class="pb">
+      <div class="flex">
+        <select id="logSel" onchange="loadLog()"><option>—</option></select>
+        <button onclick="loadLog()">Reload</button>
+      </div>
+      <pre id="logOut">—</pre>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+let CFG = {};
+
+function toggleTheme(){
+  const cur = document.documentElement.getAttribute('data-theme');
+  const next = cur === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', next);
+  try{ localStorage.setItem('labdash-theme', next); }catch(e){}
+}
+try{ const t=localStorage.getItem('labdash-theme');
+     if(t) document.documentElement.setAttribute('data-theme',t); }catch(e){}
+
+const esc = s => String(s==null?'':s).replace(/[&<>"]/g,
+  c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const dot = (el,cls) => { const d=$(el); if(d) d.className = 'dot '+(cls||''); };
+
+async function api(path, opts){
+  const r = await fetch(path, opts);
+  if(!r.ok && r.status!==403) throw new Error(path+' → '+r.status);
+  return r.json();
+}
+
+/* ---------------------------------------------------------------- config */
+async function loadConfig(){
+  CFG = await api('/api/config');
+  $('#title').textContent = CFG.project_name || 'dashboard';
+  $('#subtitle').textContent = CFG.repo_path || '';
+  const box = $('#cmdButtons'); box.innerHTML='';
+  Object.entries(CFG.commands||{}).forEach(([k,v])=>{
+    const b=document.createElement('button');
+    b.textContent = v.label + (v.where==='remote' ? ' ⇢ hpc' : '');
+    b.onclick = ()=>runCmd(k,b);
+    box.appendChild(b);
+  });
+}
+
+/* -------------------------------------------------------------- overview */
+async function loadOverview(){
+  const o = await api('/api/overview');
+
+  // repo
+  const g=o.git;
+  if(g.available){
+    const d=g.data, clean=d.dirty_count===0;
+    dot('#d-repo', clean?'ok':'warn');
+    $('#p-repo').innerHTML = `<dl class="kv">
+      <dt>branch</dt><dd class="mono">${esc(d.branch)}</dd>
+      <dt>last commit</dt><dd class="mono">${esc(d.last_commit?.sha||'—')} ${esc(d.last_commit?.subject||'')}</dd>
+      <dt>when</dt><dd>${esc(d.last_commit?.when||'—')}</dd>
+      <dt>uncommitted</dt><dd>${d.dirty_count===0
+        ? '<span class="pill ok">clean</span>'
+        : '<span class="pill warn">'+d.dirty_count+' file(s)</span>'}</dd>
+      <dt>ahead / behind</dt><dd>${d.ahead??'?'} / ${d.behind??'?'}</dd>
+      <dt>tags</dt><dd class="mono">${esc((d.tags||[]).join(', ')||'—')}</dd></dl>`;
+  } else { dot('#d-repo','bad');
+    $('#p-repo').innerHTML = `<p class="note">${esc(g.reason)}</p>`; }
+
+  // ssh
+  const s=o.ssh;
+  if(s.available){
+    dot('#d-hpc','ok');
+    $('#p-hpc').innerHTML = `<dl class="kv">
+      <dt>status</dt><dd><span class="pill ok">connected</span></dd>
+      <dt>host</dt><dd class="mono">${esc(s.data.hostname)}</dd>
+      <dt>user</dt><dd class="mono">${esc(s.data.user)}</dd>
+      <dt>latency</dt><dd>${s.took_ms} ms</dd>
+      <dt>project disk</dt><dd>${o.disk.available
+        ? esc(o.disk.data.project_used)+' used · fs '+esc(o.disk.data.filesystem_used_pct)+' full'
+        : '<span class="muted">—</span>'}</dd></dl>`;
+  } else {
+    dot('#d-hpc','bad');
+    $('#p-hpc').innerHTML = `<dl class="kv">
+      <dt>status</dt><dd><span class="pill bad">not connected</span></dd>
+      <dt>reason</dt><dd class="mono">${esc(s.reason)}</dd></dl>
+      <p class="note" style="margin-top:9px">Set <code>hpc.host</code> and
+      <code>hpc.user</code> in the config, and make sure key-based SSH works
+      from a terminal first.</p>`;
+  }
+
+  // allocation
+  const a=o.allocation||{};
+  if(a.cpu_hours||a.gpu_hours){
+    const used = a.used||{};
+    const row=(lbl,u,t)=>{
+      const pct = t ? Math.min(100,(u/t)*100) : 0;
+      const cls = pct>90?'bad':pct>70?'warn':'';
+      return `<dt>${lbl}</dt><dd>${u??0} / ${t} h
+        <div class="bar"><i class="${cls}" style="width:${pct}%"></i></div></dd>`;
+    };
+    dot('#d-alloc','ok');
+    $('#p-alloc').innerHTML = `<dl class="kv">
+      <dt>name</dt><dd class="mono">${esc(a.name||'—')}</dd>
+      ${row('CPU', used.cpu_hours, a.cpu_hours)}
+      ${row('GPU', used.gpu_hours, a.gpu_hours)}
+      <dt>expires</dt><dd>${esc(a.expires||'—')}</dd></dl>
+      <p class="note" style="margin-top:9px">Usage figures come from the config
+      file; update them from the portal, or leave them as the quota ceiling.</p>`;
+  } else {
+    dot('#d-alloc','warn');
+    $('#p-alloc').innerHTML = `<p class="note">No allocation configured.</p>`;
+  }
+  $('#stamp').textContent = 'updated ' + new Date().toLocaleTimeString();
+}
+
+/* ------------------------------------------------------------------ jobs */
+async function loadJobs(){
+  const j = await api('/api/jobs');
+  const q = j.queue;
+  if(!q.available){
+    dot('#d-jobs','bad');
+    $('#p-jobs').innerHTML = `<p class="note">${esc(q.reason)}</p>`; return;
+  }
+  const jobs=q.data||[];
+  dot('#d-jobs', jobs.length?'ok':'');
+  let html = jobs.length
+    ? `<div class="scroll"><table><tr><th>id</th><th>name</th><th>state</th>
+       <th>elapsed</th><th>limit</th><th>nodes</th><th>partition</th><th>reason</th></tr>`
+      + jobs.map(x=>`<tr><td class="mono">${esc(x.id)}</td><td>${esc(x.name)}</td>
+        <td><span class="pill ${x.state==='RUNNING'?'ok':'warn'}">${esc(x.state)}</span></td>
+        <td>${esc(x.elapsed)}</td><td>${esc(x.limit)}</td><td>${esc(x.nodes)}</td>
+        <td>${esc(x.partition)}</td><td class="muted">${esc(x.reason)}</td></tr>`).join('')
+      + `</table></div>`
+    : `<p class="empty">No jobs in the queue.</p>`;
+
+  const h=j.history;
+  if(h.available && (h.data||[]).length){
+    html += `<p class="note" style="margin:13px 0 6px">Recent (7 days)</p>
+      <div class="scroll"><table><tr><th>id</th><th>name</th><th>state</th>
+      <th>elapsed</th><th class="num">cpus</th><th>ended</th></tr>`
+      + h.data.slice().reverse().slice(0,12).map(x=>{
+          const bad=/FAIL|CANCEL|TIMEOUT/i.test(x.state);
+          return `<tr><td class="mono">${esc(x.id)}</td><td>${esc(x.name)}</td>
+          <td><span class="pill ${bad?'bad':'ok'}">${esc(x.state)}</span></td>
+          <td>${esc(x.elapsed)}</td><td class="num">${esc(x.cpus)}</td>
+          <td class="muted">${esc(x.end)}</td></tr>`;}).join('')
+      + `</table></div>`;
+  }
+  $('#p-jobs').innerHTML = html;
+}
+
+/* ----------------------------------------------------------------- tests */
+async function loadTests(){
+  const t = await api('/api/tests');
+  if(!t.available){ dot('#d-tests','bad');
+    $('#p-tests').innerHTML=`<p class="note">${esc(t.reason)}</p>`; return; }
+  const d=t.data;
+  dot('#d-tests', d.ok?'ok':'bad');
+  $('#p-tests').innerHTML = `<dl class="kv">
+    <dt>status</dt><dd>${d.ok?'<span class="pill ok">passing</span>'
+      :'<span class="pill bad">failing</span>'}</dd>
+    <dt>passed</dt><dd>${d.passed}</dd>
+    <dt>failed</dt><dd>${d.failed}</dd>
+    <dt>measured</dt><dd>${t.cached?'cached':'just now'}</dd></dl>
+    <pre style="margin-top:9px;max-height:120px">${esc((d.tail||[]).join('\n'))}</pre>`;
+}
+
+/* --------------------------------------------------------------- results */
+async function loadResultList(){
+  const r = await api('/api/results');
+  const sel=$('#resultSel'); sel.innerHTML='';
+  const items=r.data||[];
+  if(!items.length){ sel.innerHTML='<option>—</option>';
+    $('#p-result').innerHTML='<p class="empty">No result files in the results directory.</p>';
+    return; }
+  items.forEach(i=>{ const o=document.createElement('option');
+    o.value=i.name; o.textContent=i.name; sel.appendChild(o); });
+  loadResult();
+}
+
+function barChart(rows){
+  const vals = rows.map(r=>r.delta_vs_baseline||0);
+  const max = Math.max(0.0001, ...vals.map(Math.abs));
+  const W=560, rowH=26, H=rows.length*rowH+10, mid=W*0.55;
+  let svg=`<svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:${W}px">`;
+  svg+=`<line x1="${mid}" y1="4" x2="${mid}" y2="${H-6}" stroke="var(--line)"/>`;
+  rows.forEach((r,i)=>{
+    const y=i*rowH+6, d=r.delta_vs_baseline||0;
+    const w=Math.abs(d)/max*(W*0.38);
+    const x=d<0?mid-w:mid;
+    const col=d<0?'var(--bad)':(d>0?'var(--ok)':'var(--dim)');
+    svg+=`<rect x="${x}" y="${y+5}" width="${Math.max(w,1)}" height="11" fill="${col}" rx="2"/>`;
+    svg+=`<text x="6" y="${y+14}" font-size="11" fill="var(--ink)">${esc(r.arm)}</text>`;
+    svg+=`<text x="${W-4}" y="${y+14}" font-size="11" text-anchor="end"
+           fill="var(--dim)">${d>=0?'+':''}${d.toFixed(4)}</text>`;
+  });
+  return svg+`</svg>`;
+}
+
+async function loadResult(){
+  const name=$('#resultSel').value;
+  if(!name||name==='—') return;
+  const r = await api('/api/result?name='+encodeURIComponent(name));
+  if(!r.available){ $('#p-result').innerHTML=`<p class="note">${esc(r.reason)}</p>`; return; }
+  const d=r.data;
+  const rows = Array.isArray(d) ? d : (d.rows||d.arms||[]);
+  if(!rows.length){
+    $('#p-result').innerHTML=`<pre>${esc(JSON.stringify(d,null,2)).slice(0,4000)}</pre>`;
+    return;
+  }
+  let html=`<div class="scroll"><table><tr><th>configuration</th><th class="num">n</th>
+    <th class="num">mean</th><th class="num">sd</th><th class="num">delta</th>
+    <th class="num">refused</th></tr>`;
+  rows.forEach(x=>{
+    const d2=x.delta_vs_baseline;
+    const cls = d2<0?'delta-neg':(d2>0?'delta-pos':'');
+    html+=`<tr><td>${esc(x.arm)}</td><td class="num">${x.n_runs??''}</td>
+      <td class="num">${x.mean_metric!=null?Number(x.mean_metric).toFixed(4):'—'}</td>
+      <td class="num">${x.stdev!=null?Number(x.stdev).toFixed(4):'—'}</td>
+      <td class="num ${cls}">${d2!=null?(d2>=0?'+':'')+Number(d2).toFixed(4):'—'}</td>
+      <td class="num">${x.refusal_rate!=null?(x.refusal_rate*100).toFixed(0)+'%':'—'}</td></tr>`;
+  });
+  html+=`</table></div><div style="margin-top:13px">${barChart(rows)}</div>
+    <p class="note" style="margin-top:8px">Negative delta means removing that
+    gate reduced the metric — the gate was doing useful work. Positive is worth
+    investigating: it can indicate leakage the gate was suppressing.</p>`;
+  $('#p-result').innerHTML=html;
+  $('#resultMeta').textContent = rows.length + ' configurations';
+}
+
+/* ------------------------------------------------------------------ logs */
+async function loadLogList(){
+  const r = await api('/api/logs');
+  const sel=$('#logSel'); sel.innerHTML='';
+  const files=r.data||[];
+  if(!files.length){ sel.innerHTML='<option>—</option>';
+    $('#logOut').textContent='No log files.'; return; }
+  files.forEach(f=>{ const o=document.createElement('option');
+    o.value=f; o.textContent=f; sel.appendChild(o); });
+  loadLog();
+}
+async function loadLog(){
+  const n=$('#logSel').value;
+  if(!n||n==='—') return;
+  const r=await api('/api/logs?name='+encodeURIComponent(n));
+  $('#logOut').textContent = r.available ? (r.data||[]).join('\n') : r.reason;
+  const pre=$('#logOut'); pre.scrollTop = pre.scrollHeight;
+}
+
+/* -------------------------------------------------------------- commands */
+async function runCmd(key, btn){
+  const out=$('#cmdOut');
+  out.textContent='running '+key+' …';
+  document.querySelectorAll('#cmdButtons button').forEach(b=>b.disabled=true);
+  try{
+    const r = await api('/api/run', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({command:key})});
+    if(r.error){ out.textContent='refused: '+r.error; }
+    else{
+      out.textContent =
+        `${r.label}  —  exit ${r.returncode}  (${r.took_ms} ms)\n` +
+        '─'.repeat(50) + '\n' +
+        (r.stdout||'') + (r.stderr ? '\n[stderr]\n'+r.stderr : '');
+    }
+  }catch(e){ out.textContent='error: '+e.message; }
+  document.querySelectorAll('#cmdButtons button').forEach(b=>b.disabled=false);
+  if(key==='tests') loadTests();
+  loadOverview();
+}
+
+/* ------------------------------------------------------------------ chat */
+let CHAT_BUSY=false;
+
+async function loadChatState(){
+  const st = await api('/api/chat/state');
+  const sel=$('#modelSel');
+  if(!sel.options.length){
+    (st.models||[]).forEach(([id,desc])=>{
+      const o=document.createElement('option'); o.value=id; o.textContent=desc;
+      sel.appendChild(o);
+    });
+  }
+  sel.value = st.model;
+  dot('#d-chat', st.key_present?'ok':'warn');
+  if(!st.key_present){
+    $('#chatLog').innerHTML = `<p class="note">No API key found. Set the
+      <code>ANTHROPIC_API_KEY</code> environment variable, or create
+      <code>.labdash_secrets.json</code> in the project root containing
+      <code>{"anthropic_api_key": "sk-..."}</code> — and keep that file
+      gitignored. Billing is separate from a Claude subscription.</p>`;
+    $('#sendBtn').disabled = true;
+    return;
+  }
+  renderChat(st);
+}
+
+function renderChat(st){
+  const log=$('#chatLog');
+  const t=st.transcript||[];
+  if(!t.length){ return; }
+  log.innerHTML = t.map(e=>{
+    if(e.kind==='user')      return `<div class="msg user">${esc(e.text)}</div>`;
+    if(e.kind==='assistant') return `<div class="msg bot">${esc(e.text)}</div>`;
+    if(e.kind==='tool'){
+      const cls = e.blocked ? 'msg tool blocked' : 'msg tool';
+      const verdict = e.blocked ? 'BLOCKED: '+esc(e.reason||'')
+                   : e.approved ? (e.auto?'ran (auto)':'ran (approved)') : 'declined';
+      const r = e.result||{};
+      const detail = r.stdout ? String(r.stdout).slice(0,500)
+                   : (r.error ? 'error: '+r.error
+                   : (r.message||''));
+      return `<div class="${cls}">⚙ ${esc(e.name)} — ${verdict}
+${esc(detail)}</div>`;
+    }
+    return '';
+  }).join('');
+  log.scrollTop = log.scrollHeight;
+  $('#costTag').textContent = st.cost_usd
+    ? `~$${st.cost_usd.toFixed(3)} · ${st.usage.input+st.usage.output} tok` : '';
+  renderApprovals(st.pending||[]);
+}
+
+function renderApprovals(pending){
+  const box=$('#approvals');
+  if(!pending.length){ box.innerHTML=''; return; }
+  box.innerHTML = pending.map(p=>{
+    const a=p.args||{};
+    const detail = a.command ? a.command
+                 : a.path ? a.path + (a.content ? '\n\n'+String(a.content).slice(0,1200) : '')
+                 : JSON.stringify(a,null,1);
+    return `<div class="appr" data-id="${esc(p.id)}">
+      <h4>approval needed — ${esc(p.name)} (${esc(p.reason)})</h4>
+      ${a.why?`<p class="note" style="margin:0 0 6px">${esc(a.why)}</p>`:''}
+      <pre>${esc(detail)}</pre>
+      <div class="flex" style="margin:8px 0 0">
+        <button class="primary" onclick="decide('${esc(p.id)}',true)">Approve</button>
+        <button onclick="decide('${esc(p.id)}',false)">Decline</button>
+      </div></div>`;
+  }).join('');
+}
+
+const DECIDED={};
+async function decide(id, ok){
+  DECIDED[id]=ok;
+  const pend=document.querySelectorAll('.appr');
+  const allIds=[...pend].map(e=>e.dataset.id);
+  if(!allIds.every(i=>i in DECIDED)) {
+    const el=[...pend].find(e=>e.dataset.id===id);
+    if(el) el.style.opacity=.45;
+    return;
+  }
+  const approved=allIds.filter(i=>DECIDED[i]);
+  const denied=allIds.filter(i=>!DECIDED[i]);
+  allIds.forEach(i=>delete DECIDED[i]);
+  $('#approvals').innerHTML='<p class="thinking">working…</p>';
+  try{
+    const st=await api('/api/chat/approve',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({approved,denied})});
+    if(st.error){ $('#approvals').innerHTML=`<p class="note">${esc(st.error)}</p>`; }
+    else renderChat(st);
+  }catch(e){ $('#approvals').innerHTML=`<p class="note">${esc(e.message)}</p>`; }
+}
+
+async function sendChat(){
+  if(CHAT_BUSY) return;
+  const ta=$('#chatIn'); const text=ta.value.trim();
+  if(!text) return;
+  CHAT_BUSY=true; $('#sendBtn').disabled=true; ta.value='';
+  const log=$('#chatLog');
+  log.insertAdjacentHTML('beforeend', `<div class="msg user">${esc(text)}</div>
+    <p class="thinking" id="think">thinking…</p>`);
+  log.scrollTop=log.scrollHeight;
+  try{
+    const st=await api('/api/chat/send',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({text})});
+    document.getElementById('think')?.remove();
+    if(st.error){ log.insertAdjacentHTML('beforeend',
+        `<div class="msg bot">${esc(st.error)}</div>`); }
+    else renderChat(st);
+  }catch(e){
+    document.getElementById('think')?.remove();
+    log.insertAdjacentHTML('beforeend',`<div class="msg bot">${esc(e.message)}</div>`);
+  }
+  CHAT_BUSY=false; $('#sendBtn').disabled=false; ta.focus();
+}
+
+async function setModel(){
+  await api('/api/chat/model',{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({model:$('#modelSel').value})});
+}
+async function resetChat(){
+  await api('/api/chat/reset',{method:'POST',
+    headers:{'Content-Type':'application/json'},body:'{}'});
+  $('#chatLog').innerHTML='<p class="empty">New conversation.</p>';
+  $('#approvals').innerHTML=''; $('#costTag').textContent='';
+}
+
+/* ----------------------------------------------------------------- cycle */
+async function refreshAll(){
+  $('#hdot').className='dot warn';
+  try{
+    await Promise.allSettled([loadOverview(), loadJobs(),
+                              loadResultList(), loadLogList()]);
+    $('#hdot').className='dot ok';
+  }catch(e){ $('#hdot').className='dot bad'; }
+}
+
+(async function init(){
+  await loadConfig();
+  await refreshAll();
+  loadTests();
+  loadChatState();
+  setInterval(refreshAll, (CFG.refresh_seconds||30)*1000);
+})();
+</script>
+</body>
+</html>

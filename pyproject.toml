@@ -29,13 +29,19 @@ ml = ["scikit-learn>=1.3"]
 torch = ["torch>=2.0"]
 dev = ["pytest>=7", "ruff>=0.4"]
 
+[project.scripts]
+labdash = "labdash.cli:main"
+
 [project.urls]
 Homepage = "https://github.com/SalHej/eocube"
 Preprint = "https://doi.org/10.31223/X5TN59"
 Archive = "https://doi.org/10.5281/zenodo.22552042"
 
 [tool.setuptools.packages.find]
-include = ["eocube*"]
+include = ["eocube*", "labdash*"]
+
+[tool.setuptools.package-data]
+labdash = ["index.html"]
 
 [tool.ruff]
 line-length = 100

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "eocube"
-version = "0.3.0"
+version = "0.4.0"
 description = "Contract-checked multi-source Earth Observation data cubes"
 readme = "README.md"
 requires-python = ">=3.10"

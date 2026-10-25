@@ -8,3 +8,18 @@ dist/
 .DS_Store
 cube_descriptor.json
 data/
+*.tif
+*.tiff
+*.nc
+*.h5
+*.hdf
+*.jp2
+*.safe/
+*.SAFE/
+logs/
+*.pem
+*.key
+.env
+.labdash_secrets.json
+# results/ is versioned on purpose: the JSON files are the
+# record of what was run. Imagery is excluded by extension.

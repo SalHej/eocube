@@ -1,0 +1,44 @@
+{
+  "project_name": "eocube",
+  "repo_path": ".",
+  "results_dir": "results",
+  "log_dir": "logs",
+  "refresh_seconds": 30,
+
+  "hpc": {
+    "host": "",
+    "user": "",
+    "project_path": "/scratch/lustre/projects/hpc_project_a1fb2511d81f42fba1f872930bb56828",
+    "allocation": {
+      "name": "paraiska2025",
+      "cpu_hours": 6000,
+      "gpu_hours": 1000,
+      "expires": "2026-11-30",
+      "used": { "cpu_hours": 0, "gpu_hours": 0 }
+    }
+  },
+
+  "commands": {
+    "tests":     { "label": "Run tests",  "where": "local",
+                   "argv": ["python", "-m", "pytest", "-q"] },
+    "ablation":  { "label": "Ablation (synthetic)", "where": "local",
+                   "argv": ["python", "examples/retrieval_experiment.py", "--model", "rf", "--seeds", "3"] },
+    "contracts": { "label": "Contract demo", "where": "local",
+                   "argv": ["python", "examples/peatland_cube.py"] },
+    "git_status":{ "label": "Git status", "where": "local",
+                   "argv": ["git", "status", "--short"] },
+    "git_push":  { "label": "Push",       "where": "local",
+                   "argv": ["git", "push"] },
+
+    "queue":     { "label": "Queue",      "where": "remote",
+                   "remote": "squeue -u $USER" },
+    "sinfo":     { "label": "Partitions", "where": "remote",
+                   "remote": "sinfo -o '%P %G %D %m %l'" },
+    "quota":     { "label": "Disk quota", "where": "remote",
+                   "remote": "df -h /scratch/lustre | tail -3" },
+    "pull":      { "label": "Pull on HPC","where": "remote",
+                   "remote": "cd /scratch/lustre/projects/hpc_project_a1fb2511d81f42fba1f872930bb56828/eocube && git pull --ff-only" },
+    "submit":    { "label": "Submit job", "where": "remote",
+                   "remote": "cd /scratch/lustre/projects/hpc_project_a1fb2511d81f42fba1f872930bb56828/eocube && sbatch scripts/train.sbatch" }
+  }
+}

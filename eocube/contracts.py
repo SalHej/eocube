@@ -35,6 +35,7 @@ those dictionaries from real rasters.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -336,26 +337,49 @@ def check_quality_missingness(
     Each layer should carry ``invalid_fraction`` in [0, 1] and, where relevant,
     ``qa_mask_applied``. The failure prevented is gap-filled or cloud-contaminated
     values entering the model as if they were observations.
+
+    A layer with no ``invalid_fraction`` is reported as *not measured*, not as
+    clean: reading an absent figure as zero would let an unexamined layer pass
+    as a perfect one. If the figure came from a decimated read
+    (``invalid_fraction_sampling``, set by :func:`eocube.io.describe`), the
+    evidence carries the decimation step and the messages call it an estimate.
     """
     res = GateResult(gate="quality_missingness", verdict=Verdict.PASS)
     per_layer: dict[str, Any] = {}
 
     for l in layers:
         name = l["name"]
-        frac = float(l.get("invalid_fraction", 0.0))
         applied = bool(l.get("qa_mask_applied", False))
-        per_layer[name] = {"invalid_fraction": round(frac, 4), "qa_mask_applied": applied}
+        raw = l.get("invalid_fraction")
+        frac = None if raw is None else float(raw)
+        per_layer[name] = {
+            "invalid_fraction": None if frac is None else round(frac, 4),
+            "qa_mask_applied": applied,
+        }
+        sampling = l.get("invalid_fraction_sampling")
+        estimated = bool(sampling and sampling.get("estimated"))
+        if sampling:
+            per_layer[name]["sampling"] = dict(sampling)
+        how = (f" (estimated from a 1-in-{sampling['decimation_step']} decimated read)"
+               if estimated else "")
 
         if l.get("qa_mask_available", False) and not applied:
             res.verdict = Verdict.REFUSE
             res.reasons.append(
                 f"layer '{name}' has a quality mask available but not applied"
             )
-        if frac > max_invalid_fraction:
+        if frac is None:
+            if res.verdict is Verdict.PASS:
+                res.verdict = Verdict.PASS_WITH_DECISION
+            res.decisions.append(
+                f"layer '{name}' invalid fraction not measured; missingness is unknown, "
+                "not zero"
+            )
+        elif frac > max_invalid_fraction:
             if gap_fill is None:
                 res.verdict = Verdict.REFUSE
                 res.reasons.append(
-                    f"layer '{name}' is {frac:.1%} invalid, above the "
+                    f"layer '{name}' is {frac:.1%} invalid{how}, above the "
                     f"{max_invalid_fraction:.0%} threshold, and no gap-filling policy "
                     "was declared"
                 )
@@ -363,7 +387,7 @@ def check_quality_missingness(
                 if res.verdict is Verdict.PASS:
                     res.verdict = Verdict.PASS_WITH_DECISION
                 res.decisions.append(
-                    f"layer '{name}' {frac:.1%} invalid; gap-filled using "
+                    f"layer '{name}' {frac:.1%} invalid{how}; gap-filled using "
                     f"'{gap_fill}'. Filled pixels must be flagged in the cube and "
                     "reported separately in any downstream metric."
                 )
@@ -371,7 +395,7 @@ def check_quality_missingness(
             if res.verdict is Verdict.PASS:
                 res.verdict = Verdict.PASS_WITH_DECISION
             res.decisions.append(
-                f"layer '{name}' retains {frac:.1%} invalid pixels, masked not filled"
+                f"layer '{name}' retains {frac:.1%} invalid pixels{how}, masked not filled"
             )
 
     res.evidence["per_layer"] = per_layer
@@ -385,6 +409,21 @@ def check_quality_missingness(
 # --------------------------------------------------------------------------------
 _OPTICAL = {"optical", "multispectral", "hyperspectral"}
 _RADAR = {"sar", "radar"}
+_IDENT = r"[A-Za-z0-9_]"
+
+
+def _layers_in(expr: str, names: Iterable[str]) -> list[str]:
+    """Layer names that occur in ``expr`` as whole tokens.
+
+    Substring matching found ``B8`` inside ``B80`` and ``VV`` inside ``S1_VV``,
+    so an expression could be refused for bands it never used, or passed for
+    ones it did. A name matches only where it is not flanked by a letter, digit
+    or underscore. Names containing operator characters (``S2-B08``) still
+    match, but a layer named ``S2`` will then also match inside them: give
+    layers identifier-style names if expressions are to be checked.
+    """
+    return [n for n in names
+            if re.search(rf"(?<!{_IDENT}){re.escape(n)}(?!{_IDENT})", expr)]
 
 
 def check_sensor_physics(
@@ -433,8 +472,10 @@ def check_sensor_physics(
                     "index arithmetic on raw DN is not comparable across scenes"
                 )
 
+    used_by_expr: dict[str, list[str]] = {}
     for expr in band_expressions:
-        used = [n for n in by_name if n in expr]
+        used = _layers_in(expr, by_name)
+        used_by_expr[expr] = used
         mods = {str(by_name[n].get("modality", "")).lower() for n in used}
         if (mods & _OPTICAL) and (mods & _RADAR):
             res.verdict = Verdict.REFUSE
@@ -451,6 +492,7 @@ def check_sensor_physics(
                 f"layer(s) {db_used}; convert to linear power first"
             )
     res.evidence["expressions_checked"] = list(band_expressions)
+    res.evidence["layers_by_expression"] = used_by_expr
     return res
 
 

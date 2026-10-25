@@ -49,12 +49,14 @@ __all__ = [
     "DESCRIPTOR_VERSION",
 ]
 
-DESCRIPTOR_VERSION = "eocube-cube-descriptor/0.2"
+#: 0.3: per-band invalid fractions, decimation record, non-finite floats as strings.
+DESCRIPTOR_VERSION = "eocube-cube-descriptor/0.3"
 
 #: Fields that can be read from a raster, and therefore verified.
 OBSERVABLE = (
     "crs", "transform", "width", "height", "gsd", "dtype", "nodata",
-    "invalid_fraction", "band_count", "value_range",
+    "invalid_fraction", "invalid_fraction_by_band", "invalid_fraction_sampling",
+    "band_count", "value_range",
 )
 
 #: Fields that cannot be derived from pixels and must be declared by the
@@ -90,25 +92,78 @@ def _require_rasterio() -> None:
         )
 
 
-def _invalid_fraction(src, band: int = 1, max_pixels: int = 4_000_000) -> float:
-    """Fraction of pixels that are nodata or non-finite.
+def _invalid_fraction(src, max_pixels: int = 4_000_000) -> dict[str, Any]:
+    """Fraction of pixels that are nodata or non-finite, across every band.
+
+    Every band is inspected, one at a time so that a 200-band hyperspectral
+    scene costs one band of memory rather than two hundred. Checking band 1
+    alone under-reported multi-band rasters: a stack whose first band is clean
+    and whose later bands are half empty passed the quality gate as 0% invalid.
+    The headline ``invalid_fraction`` is the fraction of pixel positions invalid
+    in *any* band, because a sample that draws on all bands is lost if one is
+    missing; ``invalid_fraction_by_band`` keeps the per-band figures.
 
     Large rasters are decimated rather than read whole, so that describing a
-    cube does not cost more than the analysis it precedes. The decimation
-    factor is recorded by the caller in ``evidence``.
+    cube does not cost more than the analysis it precedes. A decimated figure is
+    an estimate, not a count, and is returned with the decimation step and pixel
+    counts so that the report can say which it is. Note that rasterio may serve
+    a decimated read from internal overviews, whose resampling can blur nodata
+    edges; treat estimates near a threshold with suspicion.
     """
     h, w = src.height, src.width
     step = max(1, int(math.sqrt((h * w) / max_pixels)))
-    data = src.read(band, out_shape=(max(1, h // step), max(1, w // step)))
-    total = data.size
-    if total == 0:
-        return 1.0
-    bad = 0
-    if src.nodata is not None:
-        bad += int(np.count_nonzero(data == src.nodata))
-    if np.issubdtype(data.dtype, np.floating):
-        bad += int(np.count_nonzero(~np.isfinite(data)))
-    return float(bad) / float(total)
+    shape = (max(1, h // step), max(1, w // step))
+    total = shape[0] * shape[1]
+    sampling = {
+        "decimation_step": step,
+        "pixels_read": total,
+        "pixels_total": h * w,
+        "estimated": step > 1,
+    }
+    if total == 0 or src.count == 0:
+        return {"invalid_fraction": 1.0, "invalid_fraction_by_band": [], **sampling}
+
+    any_bad = np.zeros(shape, dtype=bool)
+    by_band: list[float] = []
+    for b in range(1, src.count + 1):
+        data = src.read(b, out_shape=shape)
+        nodata = src.nodatavals[b - 1]
+        bad = np.zeros(shape, dtype=bool)
+        if nodata is not None and not (isinstance(nodata, float) and math.isnan(nodata)):
+            bad |= data == nodata
+        if np.issubdtype(data.dtype, np.floating):
+            bad |= ~np.isfinite(data)     # a mask, so non-finite nodata is not counted twice
+        any_bad |= bad
+        by_band.append(round(float(bad.mean()), 6))
+    return {
+        "invalid_fraction": round(float(any_bad.mean()), 6),
+        "invalid_fraction_by_band": by_band,
+        **sampling,
+    }
+
+
+def _same(key: str, observed: Any, declared: Any) -> bool:
+    """Whether a declared value agrees with an observed one.
+
+    Comparing string forms reported spurious conflicts: ``10`` against ``10.0``,
+    ``epsg:32635`` against ``EPSG:32635``, a list transform against a tuple. A
+    conflict list that cries wolf trains its reader to ignore it.
+    """
+    if key == "crs" and observed is not None and declared is not None:
+        try:
+            return CRS.from_user_input(declared) == CRS.from_user_input(observed)
+        except Exception:  # noqa: BLE001 - an unparseable CRS is a conflict
+            return False
+    if isinstance(observed, (tuple, list)) and isinstance(declared, (tuple, list)):
+        return len(observed) == len(declared) and all(
+            _same(key, o, d) for o, d in zip(observed, declared))
+    num = (int, float)
+    if isinstance(observed, num) and isinstance(declared, num) \
+            and not isinstance(observed, bool) and not isinstance(declared, bool):
+        if math.isnan(observed) or math.isnan(declared):
+            return math.isnan(observed) and math.isnan(declared)
+        return math.isclose(observed, declared, rel_tol=1e-9, abs_tol=1e-9)
+    return str(observed) == str(declared)
 
 
 def describe(
@@ -117,6 +172,7 @@ def describe(
     *,
     declared: dict[str, Any] | None = None,
     read_stats: bool = True,
+    max_stat_pixels: int = 4_000_000,
 ) -> dict[str, Any]:
     """Build a contract-gate layer description from a real raster.
 
@@ -133,6 +189,10 @@ def describe(
     read_stats
         If False, skip the pixel pass. Faster, but ``invalid_fraction`` is then
         unknown rather than zero, and the quality gate will say so.
+    max_stat_pixels
+        Pixel budget for the invalid-fraction pass. Rasters larger than this are
+        read decimated, and ``invalid_fraction_sampling`` records the step and
+        marks the figure as an estimate.
 
     Returns
     -------
@@ -147,6 +207,13 @@ def describe(
     disagreement is recorded in ``provenance.conflicts``. Silently preferring
     the declaration would reintroduce exactly the failure this module exists to
     prevent.
+
+    ``invalid_fraction`` covers every band (a pixel counts as invalid if any
+    band is invalid there), with per-band figures in
+    ``invalid_fraction_by_band`` and the read strategy in
+    ``invalid_fraction_sampling``. ``dtype`` reports band 1 only. Note that
+    :func:`eocube.pipeline.extract_samples` reads band 1 of a file-backed
+    layer, so a multi-band file contributes one feature, not one per band.
     """
     _require_rasterio()
     path = Path(path)
@@ -173,14 +240,17 @@ def describe(
                 "gsd reports the x dimension only"
             )
         if read_stats:
-            obs["invalid_fraction"] = round(_invalid_fraction(src), 6)
+            stats = _invalid_fraction(src, max_pixels=max_stat_pixels)
+            obs["invalid_fraction"] = stats.pop("invalid_fraction")
+            obs["invalid_fraction_by_band"] = stats.pop("invalid_fraction_by_band")
+            obs["invalid_fraction_sampling"] = stats
         layer.update(obs)
         prov.observed = obs
 
     # declared fields: record, and flag anything that contradicts the file
     for key, value in declared.items():
         if key in OBSERVABLE and key in prov.observed:
-            if str(prov.observed[key]) != str(value):
+            if not _same(key, prov.observed[key], value):
                 prov.conflicts.append(
                     f"{layer['name']}: declared {key}={value!r} contradicts "
                     f"observed {key}={prov.observed[key]!r}; the observed value is used"
@@ -257,7 +327,27 @@ def to_descriptor(
 
     if extra:
         doc["extra"] = extra
-    return doc
+    return _json_safe(doc)
+
+
+def _json_safe(obj: Any) -> Any:
+    """Replace values strict JSON cannot carry.
+
+    A float raster's nodata is commonly NaN, and ``json.dumps`` writes that as a
+    bare ``NaN`` token, which is not JSON: a browser or any strict parser
+    rejects the whole descriptor. Non-finite floats become the strings
+    ``"nan"``, ``"inf"`` and ``"-inf"`` rather than ``null``, because ``null``
+    already means "no nodata value" and the two must stay distinguishable.
+    """
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    if _HAVE_RASTERIO and isinstance(obj, np.generic):
+        obj = obj.item()
+    if isinstance(obj, float) and not math.isfinite(obj):
+        return "nan" if math.isnan(obj) else ("inf" if obj > 0 else "-inf")
+    return obj
 
 
 def write_descriptor(doc: dict[str, Any], path: str | Path) -> Path:

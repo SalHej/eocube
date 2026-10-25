@@ -1,0 +1,122 @@
+# Example ablation study on synthetic data.
+#
+#   python experiments/run_ablation.py --config experiments/configs/example.yaml
+#
+# The `synthetic` block makes the runner write small GeoTIFFs to a temporary
+# directory (deleted afterwards) and substitute it for {synthetic} in every path.
+# For a real study, delete `synthetic`, set `data_root` to the project directory
+# on the cluster, and point each path at a real raster. Nothing else changes.
+#
+# Thresholds under `gates` are the library defaults, written out so the study
+# records what it used. They are starting points, not standards; justify each one
+# per study (README, "Scope and limitations").
+#
+# The same structure as JSON works without PyYAML.
+
+study: example-synthetic
+
+synthetic:
+  size: 96
+  seed: 0
+
+# data_root: /scratch/lustre/projects/hpc_project_a1fb2511d81f42fba1f872930bb56828/data
+
+target_time: 2025-07-15
+
+layers:
+  - name: S1_VV
+    path: "{synthetic}/s1_vv.tif"
+    source: S1                     # groups acquisitions for the temporal gate
+    acquisitions: [2025-07-12]
+    declared:
+      modality: sar
+      units: linear
+      calibrated: true
+      terrain_corrected: true
+  - name: S2_B08
+    path: "{synthetic}/s2_b08.tif"   # cloud pixels already set to nodata
+    source: S2
+    acquisitions: [2025-07-11]
+    declared:
+      modality: optical
+      reflectance: true
+      qa_mask_available: true
+      qa_mask_applied: true
+  - name: TSX_HH
+    path: "{synthetic}/tsx_hh.tif"
+    source: TSX
+    acquisitions: [2025-06-30]
+    declared:
+      modality: sar
+      units: linear
+      calibrated: true
+      terrain_corrected: true
+  - name: ERA5_T
+    path: "{synthetic}/era5_t.tif"
+    # band: 1                      # required if the file has more than one band
+    declared:
+      modality: meteorological
+
+target:
+  path: "{synthetic}/target_sm.tif"
+  band: 1
+
+model:
+  name: ridge                      # ridge | rf | gb | torch
+  params: {alpha: 1.0}
+  # name: rf
+  # params: {n_estimators: 300, n_jobs: 8}
+  # name: torch
+  # params: {hidden: [128, 64], epochs: 200, lr: 0.001, batch_size: 512}
+
+metric: r2                         # r2 | neg_rmse; higher is better either way
+
+seeds: [0, 1, 2]                   # minimum three for a reportable result
+
+split:                             # spatial blocks only; there is no random option
+  n_blocks: 8
+  test_fraction: 0.25
+  exclude_synthetic_from_test: true
+
+samples:
+  gap_filled_layers: []
+
+gates:
+  require_identical_crs: true
+  max_grid_offset_px: 0.1
+  target_gsd: null                 # null: coarsest input, so nothing is upsampled
+  allow_upsampling: false
+  resampling: bilinear
+  window_days: 30.0
+  decay_alpha: 0.05
+  forbid_future: true
+  max_invalid_fraction: 0.30
+  gap_fill: null
+  band_expressions: ["S1_VV + TSX_HH"]
+  require_terrain_correction: true
+
+ablation:
+  gates: [geometry_crs, resolution, temporal_alignment, quality_missingness, sensor_physics]
+  # Train even when the full gate set would refuse, so the cost of ignoring a
+  # gate is measured rather than assumed.
+  train_on_refused: true
+  # The cube you would have built without each gate. A gate with no variant
+  # trains on the baseline files and its delta is zero by construction.
+  variants:
+    geometry_crs:
+      S2_B08: {path: "{synthetic}/s2_b08_halfpx.tif"}      # half-pixel grid offset
+    temporal_alignment:
+      S1_VV:
+        path: "{synthetic}/s1_vv_future.tif"               # acquired after target_time
+        acquisitions: [2025-07-12, 2025-07-22]
+    quality_missingness:
+      S2_B08:
+        path: "{synthetic}/s2_b08_cloudy.tif"              # cloud left in
+        declared: {qa_mask_applied: false}
+    sensor_physics:
+      S1_VV:
+        path: "{synthetic}/s1_vv_db.tif"                   # dB, then added
+        declared: {units: db}
+    # resolution: no variant; all synthetic layers share one 10 m grid.
+
+output: results/example-synthetic.json

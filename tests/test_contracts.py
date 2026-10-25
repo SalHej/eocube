@@ -98,6 +98,31 @@ def test_raw_dn_optical_is_flagged():
     r = check_sensor_physics([L("B8", reflectance=False)])
     assert r.verdict is Verdict.PASS_WITH_DECISION
 
+def _sar(name, **kw):
+    return L(name, modality="sar", units="linear", calibrated=True, terrain_corrected=True, **kw)
+
+def test_band_name_not_matched_inside_longer_name():
+    # B8 is optical, B80 is radar; the expression uses only B80
+    r = check_sensor_physics([L("B8"), _sar("B80")], band_expressions=["B80 * 2"])
+    assert r.verdict is Verdict.PASS
+    assert r.evidence["layers_by_expression"]["B80 * 2"] == ["B80"]
+
+def test_band_name_not_matched_as_suffix():
+    # VV (radar) must not be found inside S2_VV (optical)
+    r = check_sensor_physics([L("S2_VV"), _sar("VV")], band_expressions=["S2_VV / 3"])
+    assert r.verdict is Verdict.PASS
+
+def test_tokenised_match_still_refuses_real_mixing():
+    r = check_sensor_physics([L("B8"), _sar("B80")], band_expressions=["(B8-B80)/(B8+B80)"])
+    assert r.verdict is Verdict.REFUSE
+    assert r.evidence["layers_by_expression"]["(B8-B80)/(B8+B80)"] == ["B8", "B80"]
+
+def test_missing_invalid_fraction_is_unknown_not_zero():
+    layer = L("a"); del layer["invalid_fraction"]
+    r = check_quality_missingness([layer])
+    assert r.verdict is Verdict.PASS_WITH_DECISION
+    assert r.evidence["per_layer"]["a"]["invalid_fraction"] is None
+
 def test_gate_ablation():
     layers = [L("a"), L("b", crs="EPSG:4326")]
     assert not run_all_gates(layers).ok

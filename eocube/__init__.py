@@ -5,7 +5,7 @@ Reference implementation accompanying:
     Observation. EarthArXiv. https://doi.org/10.31223/X5TN59
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 from .contracts import (  # noqa: F401
     Verdict, GateResult, ContractReport, GATES, run_all_gates,

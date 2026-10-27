@@ -369,6 +369,7 @@ def check_quality_missingness(
     *,
     max_invalid_fraction: float = 0.30,
     gap_fill: str | None = None,
+    max_implausible_fraction: float = 0.01,
 ) -> GateResult:
     """Verify that quality masks are honoured and gap-filling is declared.
 
@@ -388,6 +389,18 @@ def check_quality_missingness(
     pixel that is 0 in every band is almost never a measurement, so above the
     threshold it is treated like measured invalidity. In a single band, zero is
     often a legitimate value (a mask, a class, no rain), so it is only recorded.
+
+    Missingness is not the only way a pixel can fail to be an observation. A
+    fill value that is not flagged as nodata reads as data. The case that
+    prompted this check: at a Sentinel-2 swath edge, L2A B02 read 1 DN (reflectance
+    0.0001) with SCL claiming data. Where a layer declares a physical
+    ``plausible_range``, :func:`eocube.io.describe` measures
+    ``implausible_fraction``: pixels outside the range that are not nodata. Above
+    ``max_implausible_fraction`` the layer is refused. A declared gap-fill policy does
+    not excuse this, because these pixels are not flagged as gaps, so no fill would
+    touch them. A layer that declares a range that was never measured is reported as
+    unmeasured. A layer that declares no range is not checked: physical plausibility
+    depends on the sensor, units and surface, which the gate cannot infer.
     """
     res = GateResult(gate="quality_missingness", verdict=Verdict.PASS)
     per_layer: dict[str, Any] = {}
@@ -464,7 +477,38 @@ def check_quality_missingness(
                     "least this high"
                 )
 
+        bounds = l.get("plausible_range")
+        if bounds is not None:
+            implausible = l.get("implausible_fraction")
+            per_layer[name]["plausible_range"] = list(bounds)
+            per_layer[name]["implausible_fraction"] = (
+                None if implausible is None else round(float(implausible), 4))
+            if implausible is None:
+                if res.verdict is Verdict.PASS:
+                    res.verdict = Verdict.PASS_WITH_DECISION
+                res.decisions.append(
+                    f"layer '{name}' declares a plausible range {list(bounds)} but it was "
+                    "not measured; physically implausible values are unknown, not absent"
+                )
+            elif implausible > max_implausible_fraction:
+                res.verdict = Verdict.REFUSE
+                res.reasons.append(
+                    f"layer '{name}': {implausible:.1%} of pixels are not nodata but lie "
+                    f"outside the declared physical range {list(bounds)}{how}, above the "
+                    f"{max_implausible_fraction:.0%} tolerance. These read as data and are "
+                    "not; typically unflagged fill at a swath or tile edge"
+                )
+            elif implausible > 0:
+                if res.verdict is Verdict.PASS:
+                    res.verdict = Verdict.PASS_WITH_DECISION
+                res.decisions.append(
+                    f"layer '{name}' has {implausible:.2%} of pixels outside its declared "
+                    f"physical range {list(bounds)}{how}, within the "
+                    f"{max_implausible_fraction:.0%} tolerance; they must be masked, not used"
+                )
+
     res.evidence["per_layer"] = per_layer
+    res.evidence["max_implausible_fraction"] = max_implausible_fraction
     if gap_fill:
         res.evidence["gap_fill_policy"] = gap_fill
     return res
@@ -656,6 +700,7 @@ def run_all_gates(
                 layers,
                 max_invalid_fraction=kwargs.get("max_invalid_fraction", 0.30),
                 gap_fill=kwargs.get("gap_fill"),
+                max_implausible_fraction=kwargs.get("max_implausible_fraction", 0.01),
             )
         )
     if "sensor_physics" not in skip:

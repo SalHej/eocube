@@ -127,6 +127,27 @@ Counted from STAC metadata over the network bounding box (`count_acq.py`, no ima
 6. **Optical validity:** the S2 value is used only where SCL at that pixel is 4
    (vegetation) or 5 (bare soil). Otherwise the next older S2 scene is tried, within
    the temporal gate's window.
+7. **Decide at cube assembly, deliberately (not yet implemented): exclude water and
+   unclassified pixels from the training samples.** A soil-moisture target over a
+   pond or ditch is meaningless, however valid its reflectance.
+   - **Rule:** mask SCL 6 (water) and 7 (unclassified) from the training pixels.
+   - **Report the cost per station:** the fraction of chip pixels removed.
+   - **Look for stations that are mostly water or built-up, before the ablation, not
+     after.**
+   - **Caveat:** SCL has no built-up class; roads and roofs fall under 5 ("not
+     vegetated") with bare soil. Detecting a mostly built-up chip needs an independent
+     land-cover layer, e.g. ESA WorldCover 10 m (open, CC-BY-4.0). That would be one
+     more open download, to be approved separately.
+   - **Per-pixel edge and fill masking at the station.** `fetch_year.py` tags every
+     S2 chip with `station_measured`: false where the station pixel is fill, implausible
+     (B02 < 50 DN over land) or within 2 pixels of the swath edge in every candidate
+     tile. Cube assembly must drop those station-dates. The quality gate judges whole
+     layers: a 0.7% fill strip passes its 1% tolerance even when the strip is the sample
+     pixel (docs/examples/swath_edges.md). Report per station how many dates this
+     removes. ITCSM_08 sits on one S2 orbit's swath edge and loses that orbit's dates.
+   - **Not the same as the fetch-time rule.** At fetch time, water is exempt from the
+     B02 ≥ 50 plausibility floor so that it is not mistaken for fill. That decides
+     which *tile* to read, not which pixels to train on.
 
 ## Expected sample count
 

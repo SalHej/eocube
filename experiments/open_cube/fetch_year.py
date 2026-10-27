@@ -12,10 +12,11 @@ Run in a Slurm job, never on a login node (scripts/fetch_year.sbatch).
   published.
 - S1: every pass in the year. For each station, the frame whose footprint contains the
   station is used, because one frame does not always reach all stations.
-- S2: every date in the year. For each station, the first tile whose footprint
-  contains it and has data there, UTM zone 32 tiles first. The network spans two tile
-  rows and the 31/32 zone boundary. All dates are fetched regardless of cloud;
-  per-pixel SCL decides validity later.
+- S2: every date in the year. For each station, of the tiles whose footprint contains
+  it, the one with the most real-measurement pixels at the station (SCL not 0/1 and
+  B02 >= 50 DN, water exempt). Swath-edge fill reads as small positive numbers, so
+  "not nodata" is not enough. Cloud counts as measured, so it cannot steer the choice.
+  All dates are fetched regardless of cloud; per-pixel SCL decides validity later.
 - Resumable: a chip already on disk is skipped. Every chip and every failure is
   appended to manifest.jsonl, so an interrupted run loses nothing and is auditable.
 
@@ -25,6 +26,7 @@ Open data only: Planetary Computer (anonymous SAS tokens) and DANS (CC-BY-4.0).
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import sys
@@ -36,6 +38,7 @@ from contextlib import ExitStack
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+import numpy as np
 import rasterio
 from rasterio.warp import transform
 from rasterio.windows import Window
@@ -92,22 +95,53 @@ def station_positions(year: int) -> dict[str, tuple[float, float]]:
             for s, locs in LOCATIONS.items()}
 
 
-def _json(url, body=None):
-    req = urllib.request.Request(url, json.dumps(body).encode() if body else None,
-                                 {"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=120) as r:
-        return json.load(r)
+def _json(url, body=None, attempts=6):
+    """GET or POST JSON, retrying transient failures (5xx, timeouts) with backoff.
+
+    The STAC API returned a 504 during testing; without a retry, one transient error
+    at start-up would end a multi-hour job.
+    """
+    for i in range(attempts):
+        req = urllib.request.Request(url, json.dumps(body).encode() if body else None,
+                                     {"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=120) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            if e.code < 500 or i == attempts - 1:
+                raise
+        except (urllib.error.URLError, TimeoutError, ConnectionError,
+                http.client.HTTPException):          # incl. RemoteDisconnected, seen in testing
+            if i == attempts - 1:
+                raise
+        time.sleep(min(60, 5 * 2 ** i))
 
 
 def search(collection: str, year: int) -> list[dict]:
-    body = {"collections": [collection], "bbox": BBOX,
-            "datetime": f"{year}-01-01T00:00:00Z/{year}-12-31T23:59:59Z", "limit": 1000}
-    out = []
-    while body:
-        d = _json(f"{STAC}/search", body)
-        out += d["features"]
-        nxt = [l for l in d.get("links", []) if l.get("rel") == "next"]
-        body = nxt[0].get("body") if nxt else None
+    """All items over BBOX in ``year``, queried one month at a time.
+
+    A single full-year query (up to ~580 S2 items) repeatedly hit 504 Gateway Timeout;
+    month-sized pages are small enough to succeed and retry independently.
+    """
+    out, seen = [], set()
+    for month in range(1, 13):
+        end = f"{year + 1}-01-01" if month == 12 else f"{year}-{month + 1:02d}-01"
+        body = {"collections": [collection], "bbox": BBOX, "limit": 250,
+                "datetime": f"{year}-{month:02d}-01T00:00:00Z/{end}T00:00:00Z"}
+        for _page in range(100):                          # hard cap: never loop forever
+            d = _json(f"{STAC}/search", body)
+            new = [i for i in d["features"] if i["id"] not in seen]
+            for item in new:                              # month boundaries are inclusive
+                seen.add(item["id"])
+                out.append(item)
+            nxt = [l for l in d.get("links", []) if l.get("rel") == "next"]
+            # stop on a short or repeated page: the API can keep offering a "next"
+            # link after the last page, which made the earlier loop spin forever
+            if not nxt or not new or len(d["features"]) < body["limit"]:
+                break
+            body = {**body, **(nxt[0].get("body") or {})}
+        else:
+            raise RuntimeError(f"STAC paging did not terminate for {collection} {year}-{month:02d}")
     return out
 
 
@@ -260,15 +294,82 @@ def _s1_stations(group, pos, out, chip_m, man, stamp, p0, opened) -> int:
     return done
 
 
+#: S2 L2A scene classes that mean "no measurement here" (SCL 0 = no data, 1 = saturated
+#: or defective). Cloud (8-10) and shadow (3) ARE measurements: they are a per-pixel
+#: validity question for the cube, not a tile-selection one.
+SCL_NOT_MEASURED = (0, 1)
+SCL_WATER = 6
+#: Over land, L2A B02 below ~50 DN (reflectance 0.005) is not credible. Fill values at
+#: swath edges read as small positive numbers (B02 = 1 was seen at ITCSM_08 on
+#: 2019-06-25, with SCL claiming data). Water is genuinely dark in blue, so exempt.
+B02_FLOOR = 50
+#: Pixels within this many 20 m pixels of the image's nodata boundary are not trusted.
+#: At 2019-06-25 the swath edge ran through ITCSM_08: one UTM grid put the station on a
+#: 1-pixel fill strip (B02 = 1), the other put it one pixel inside (B02 = 1260). Both
+#: grids resample the same acquisition, so neither value at the edge is reliable.
+EDGE_BUFFER_PX = 2
+
+
+def measured_mask(b02, scl):
+    """Real-measurement pixels of a chip, on the SCL (20 m) grid.
+
+    A pixel is measured if SCL is not 0/1, B02 is plausible over land (>= 50 DN;
+    water exempt) and it is at least EDGE_BUFFER_PX pixels from the nodata boundary.
+    Cloud counts as measured, so cloudiness cannot steer tile choice. Two tiles of the
+    same cloud are equally cloudy, and preferring clear tiles would bias the sample
+    toward dry weather.
+    """
+    scl = scl[0]
+    b = b02[0][::2, ::2][: scl.shape[0], : scl.shape[1]]      # 10 m -> 20 m, same extent
+    scl = scl[: b.shape[0], : b.shape[1]]
+    empty = (b == 0) | (scl == 0)
+    near_edge = empty.copy()
+    for _ in range(EDGE_BUFFER_PX):                            # dilate the nodata region
+        grown = near_edge.copy()
+        grown[1:, :] |= near_edge[:-1, :]; grown[:-1, :] |= near_edge[1:, :]
+        grown[:, 1:] |= near_edge[:, :-1]; grown[:, :-1] |= near_edge[:, 1:]
+        near_edge = grown
+    return (~np.isin(scl, SCL_NOT_MEASURED) & ~near_edge
+            & ((b >= B02_FLOOR) | (scl == SCL_WATER)))
+
+
+def tile_score(b02, scl, scl_transform, crs, lon: float, lat: float
+               ) -> tuple[float, float, float]:
+    """(station pixel measured, 0 or 1; measured fraction of the 3 x 3 window around
+    it; measured fraction of the whole chip), compared in that order.
+
+    The station's own pixel decides first. A window score alone called a station one
+    pixel from the swath edge one-third measured, though that pixel is untrusted. Its position is located through the SCL
+    chip's transform, not assumed central, because a chip is clipped where it meets
+    a tile edge, which is exactly where this matters.
+    """
+    m = measured_mask(b02, scl)
+    if not m.size:
+        return 0.0, 0.0, 0.0
+    x, y = transform("EPSG:4326", crs, [lon], [lat])
+    col, row = ~scl_transform * (x[0], y[0])
+    r, c = int(row), int(col)
+    if not (0 <= r < m.shape[0] and 0 <= c < m.shape[1]):
+        return 0.0, 0.0, float(m.mean())
+    window = m[max(0, r - 1): r + 2, max(0, c - 1): c + 2]
+    return float(m[r, c]), float(window.mean()), float(m.mean())
+
+
 def s2_task(tiles: dict, pos, out: Path, tokens: Tokens, chip_m: float, man: Manifest):
     """One S2 date: every asset's chip for every station.
 
-    ``tiles`` maps MGRS tile to item for that date. For each station, the candidates
-    are the tiles whose footprint contains it, UTM zone 32 first (EPSG:32632, the
-    zone most stations fall in), and the first with data at the station (B02 not all
-    nodata) is used. The network straddles two tile rows (the northern stations lie
-    beyond 32ULC) and the 31/32 zone boundary. SCL is written last, so its presence
-    marks a station-date as complete for resuming.
+    ``tiles`` maps MGRS tile to item for that date. For each station the candidates
+    are the tiles whose footprint contains it. The footprint is only a cheap first
+    filter: 287 of 2019's 578 footprints are the bare tile square, and a footprint
+    can "contain" a station where the pixels are fill. Each candidate's B02 and SCL
+    chips are read and scored by :func:`tile_score`: the station pixel, then the 3 x 3
+    window around it, then the whole chip, with zone 32 only
+    breaking exact ties. Chip-level counts alone could not separate two grids of the
+    same acquisition whose swath edge ran through the station. If no tile has a
+    trustworthy station pixel, the best chip is still written, so the cube sees the
+    date, and the manifest records ``station_measured: false``. Every candidate's
+    score goes to the manifest. SCL is written last, so its presence marks a
+    station-date as complete for resuming.
     """
     first = next(iter(tiles.values()))["properties"]
     stamp = first["datetime"][:16].replace(":", "")
@@ -287,42 +388,53 @@ def s2_task(tiles: dict, pos, out: Path, tokens: Tokens, chip_m: float, man: Man
             if list((out / "s2" / station).glob(f"S2_{stamp}_*_SCL.tif")):
                 continue
             candidates = [t for t in order if _inside(tiles[t], lon, lat)]
+            scores = {}
             for tile in candidates:
-                item, p = tiles[tile], tiles[tile]["properties"]
                 try:
-                    chips = {}
-                    for a in S2_ASSETS:
-                        src = opened(tile, a)
-                        data, tr = chip(src, lon, lat, chip_m)
-                        if data is None:
-                            break
-                        nd = _nodata_fraction(data, 0 if src.nodata is None else src.nodata)
-                        if a == "B02" and nd == 1.0:
-                            break                         # beyond this swath: next tile
-                        chips[a] = (data, tr, src.profile.copy(), nd)
-                    if len(chips) < len(S2_ASSETS):
-                        continue
-                except Exception as e:  # noqa: BLE001 - record and try the next tile
-                    man.add(kind="s2", station=station, item_id=item["id"], status="error",
-                            error=str(e)[:300])
-                    continue
-                for a, (data, tr, profile, nd) in chips.items():
-                    name = f"S2_{stamp}_{tile}_EPSG{p['proj:epsg']}_{a}.tif"
-                    tags = {"item_id": item["id"], "asset": a, "datetime": p["datetime"],
-                            "mgrs_tile": tile, "platform": p["platform"],
-                            "tile_cloud_cover": p["eo:cloud_cover"],
-                            "processing_baseline": p.get("s2:processing_baseline"),
-                            "station": station, "station_lonlat": f"{lon},{lat}"}
-                    size = write(out / "s2" / station / name, data, profile, tr, tags)
-                    man.add(kind="s2", station=station, file=name, item_id=item["id"],
-                            datetime=p["datetime"], crs=f"EPSG:{p['proj:epsg']}", bytes=size,
-                            nodata_fraction=round(nd, 4), tiles_tried=candidates.index(tile) + 1,
-                            status="ok")
-                    done += 1
-                break
-            else:
+                    b02, _ = chip(opened(tile, "B02"), lon, lat, chip_m)
+                    scl_src = opened(tile, "SCL")
+                    scl, scl_tr = chip(scl_src, lon, lat, chip_m)
+                    scores[tile] = ((0.0, 0.0, 0.0) if b02 is None or scl is None
+                                    else tile_score(b02, scl, scl_tr, scl_src.crs, lon, lat))
+                except Exception as e:  # noqa: BLE001 - record; the tile scores nothing
+                    man.add(kind="s2", station=station, item_id=tiles[tile]["id"],
+                            status="error", error=str(e)[:300])
+                    scores[tile] = (0.0, 0.0, 0.0)
+            best = max(candidates, key=lambda t: (scores[t], -order.index(t)), default=None)
+            if best is None or scores[best][2] == 0.0:
                 man.add(kind="s2", station=station, datetime=first["datetime"],
-                        tiles=candidates, status="all_nodata")
+                        tile_scores={t: [round(v, 3) for v in sc] for t, sc in scores.items()},
+                        status="no_measurement")
+                continue
+            item, p = tiles[best], tiles[best]["properties"]
+            try:
+                chips = {}
+                for a in S2_ASSETS:
+                    src = opened(best, a)
+                    data, tr = chip(src, lon, lat, chip_m)
+                    nd = _nodata_fraction(data, 0 if src.nodata is None else src.nodata)
+                    chips[a] = (data, tr, src.profile.copy(), nd)
+            except Exception as e:  # noqa: BLE001 - record and move on
+                man.add(kind="s2", station=station, item_id=item["id"], status="error",
+                        error=str(e)[:300])
+                continue
+            for a, (data, tr, profile, nd) in chips.items():
+                name = f"S2_{stamp}_{best}_EPSG{p['proj:epsg']}_{a}.tif"
+                tags = {"item_id": item["id"], "asset": a, "datetime": p["datetime"],
+                        "mgrs_tile": best, "platform": p["platform"],
+                        "tile_cloud_cover": p["eo:cloud_cover"],
+                        "processing_baseline": p.get("s2:processing_baseline"),
+                        "station_measured": bool(scores[best][0]),
+                        "station_window_measured_fraction": round(scores[best][1], 4),
+                        "measured_fraction": round(scores[best][2], 4),
+                        "station": station, "station_lonlat": f"{lon},{lat}"}
+                size = write(out / "s2" / station / name, data, profile, tr, tags)
+                man.add(kind="s2", station=station, file=name, item_id=item["id"],
+                        datetime=p["datetime"], crs=f"EPSG:{p['proj:epsg']}", bytes=size,
+                        nodata_fraction=round(nd, 4), station_measured=scores[best][0] > 0,
+                        tile_scores={t: [round(v, 3) for v in sc] for t, sc in scores.items()},
+                        status="ok")
+                done += 1
     return done
 
 

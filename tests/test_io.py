@@ -361,3 +361,68 @@ def test_real_shaped_tile_is_refused_by_quality_gate(make_tif):
     assert by_gate["temporal_alignment"].verdict is Verdict.NOT_EVALUATED
     assert by_gate["sensor_physics"].verdict is Verdict.NOT_EVALUATED
     assert not rep.ok
+
+
+# --------------------------------------------------------------------------
+# physically implausible values that read as data (Sentinel-2 swath edge)
+# --------------------------------------------------------------------------
+S2_B02_RANGE = (50, 12000)    # L2A DN over land; below ~50 is not a credible reflectance
+
+
+def _swath_edge_b02():
+    """A 10 x 10 B02 chip: plausible reflectance, with the left 3 columns set to 1 DN,
+    as seen at ITCSM_08 on 2019-06-25 (32ULC). Nodata is 0, so nothing is flagged."""
+    data = np.full((10, 10), 1200, dtype="uint16")
+    data[:, :3] = 1
+    return data
+
+
+def test_implausible_fraction_measured_against_declared_range(make_tif):
+    p = make_tif("b02", _swath_edge_b02(), dtype="uint16", nodata=0)
+    layer = describe(p, declared={"plausible_range": S2_B02_RANGE})
+    assert layer["invalid_fraction"] == 0.0              # nodata cannot see it...
+    assert layer["implausible_fraction"] == pytest.approx(0.3)   # ...the physical bound can
+    assert layer["implausible_fraction_by_band"] == [pytest.approx(0.3)]
+    assert layer["provenance"]["declared"]["plausible_range"] == S2_B02_RANGE
+
+
+def test_swath_edge_fill_is_refused_by_quality_gate(make_tif):
+    p = make_tif("b02", _swath_edge_b02(), dtype="uint16", nodata=0)
+    layer = describe(p, declared={"plausible_range": S2_B02_RANGE})
+    rep = run_all_gates([layer], skip=["geometry_crs", "resolution", "temporal_alignment",
+                                       "sensor_physics"])
+    gate = rep.results[0]
+    assert gate.verdict is Verdict.REFUSE
+    assert "outside the declared physical range" in gate.reasons[0]
+
+
+def test_gap_fill_policy_does_not_excuse_implausible_values(make_tif):
+    p = make_tif("b02", _swath_edge_b02(), dtype="uint16", nodata=0)
+    layer = describe(p, declared={"plausible_range": S2_B02_RANGE})
+    rep = run_all_gates([layer], skip=["geometry_crs", "resolution", "temporal_alignment",
+                                       "sensor_physics"], gap_fill="nearest")
+    assert rep.results[0].verdict is Verdict.REFUSE
+
+
+def test_nodata_pixels_are_not_counted_as_implausible(make_tif):
+    data = np.full((10, 10), 1200, dtype="uint16")
+    data[:, :3] = 0                                      # flagged fill, not implausible data
+    layer = describe(make_tif("b02", data, dtype="uint16", nodata=0),
+                     declared={"plausible_range": S2_B02_RANGE})
+    assert layer["invalid_fraction"] == pytest.approx(0.3)
+    assert layer["implausible_fraction"] == 0.0
+
+
+def test_no_declared_range_means_no_plausibility_check(make_tif):
+    layer = describe(make_tif("b02", _swath_edge_b02(), dtype="uint16", nodata=0))
+    assert "implausible_fraction" not in layer
+
+
+def test_declared_range_without_stats_is_unmeasured_not_clean(make_tif):
+    p = make_tif("b02", _swath_edge_b02(), dtype="uint16", nodata=0)
+    layer = describe(p, declared={"plausible_range": S2_B02_RANGE}, read_stats=False)
+    rep = run_all_gates([layer], skip=["geometry_crs", "resolution", "temporal_alignment",
+                                       "sensor_physics"])
+    gate = rep.results[0]
+    assert gate.verdict is Verdict.PASS_WITH_DECISION
+    assert any("plausible range" in d and "not measured" in d for d in gate.decisions)

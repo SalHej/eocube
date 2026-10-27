@@ -52,13 +52,15 @@ __all__ = [
 #: 0.3: per-band invalid fractions, decimation record, non-finite floats as strings.
 #: 0.4: gsd_units and ground GSD for geographic CRS, zero_fill_fraction, value_range,
 #:      declared nodata honoured when the file has none.
-DESCRIPTOR_VERSION = "eocube-cube-descriptor/0.4"
+#: 0.5: implausible_fraction against a declared plausible_range.
+DESCRIPTOR_VERSION = "eocube-cube-descriptor/0.5"
 
 #: Fields that can be read from a raster, and therefore verified.
 OBSERVABLE = (
     "crs", "transform", "width", "height", "gsd", "gsd_units", "gsd_ground_m", "dtype",
     "nodata", "invalid_fraction", "invalid_fraction_by_band", "invalid_fraction_sampling",
-    "zero_fill_fraction", "band_count", "value_range",
+    "zero_fill_fraction", "band_count", "value_range", "implausible_fraction",
+    "implausible_fraction_by_band",
 )
 
 #: Fields that cannot be derived from pixels and must be declared by the
@@ -67,7 +69,7 @@ OBSERVABLE = (
 DECLARED_ONLY = (
     "modality", "units", "calibrated", "terrain_corrected", "reflectance",
     "qa_mask_available", "qa_mask_applied", "acquisition_time", "sensor",
-    "processing_level",
+    "processing_level", "plausible_range",
 )
 
 
@@ -125,6 +127,7 @@ def _ground_gsd_m(transform, height: int) -> tuple[float, float]:
 
 def _invalid_fraction(
     src, max_pixels: int = 4_000_000, assumed_nodata: float | None = None,
+    plausible_range: Sequence[float] | None = None,
 ) -> dict[str, Any]:
     """Fraction of pixels that are nodata or non-finite, across every band.
 
@@ -151,6 +154,15 @@ def _invalid_fraction(
     no nodata tag, and were measured as 0% invalid. Zero is not always fill, so
     this is evidence for the quality gate to weigh, not a count of invalid pixels.
     ``value_range`` is the (min, max) over valid pixels of all bands.
+
+    ``plausible_range`` is a caller-declared physical range ``(lo, hi)``. Pixels
+    that are not nodata, and so read as data, but fall outside it are counted in
+    ``implausible_fraction`` (positions implausible in any band) and
+    ``implausible_fraction_by_band``. This catches fill that does not look like
+    fill: at a Sentinel-2 swath edge, L2A B02 read 1 DN (a reflectance of 0.0001)
+    where SCL claimed data and nodata (0) was not set. Nodata checks cannot see
+    such a pixel; a physical bound can. The range is declared because only the
+    caller knows the sensor, units and surface; the pixels alone cannot say.
     """
     h, w = src.height, src.width
     step = max(1, int(math.sqrt((h * w) / max_pixels)))
@@ -170,8 +182,10 @@ def _invalid_fraction(
                 "value_range": None, **sampling}
 
     any_bad = np.zeros(shape, dtype=bool)
+    any_implausible = np.zeros(shape, dtype=bool)
     all_zero = np.ones(shape, dtype=bool)
     by_band: list[float] = []
+    implausible_by_band: list[float] = []
     lo, hi = math.inf, -math.inf
     for b in range(1, src.count + 1):
         data = src.read(b, out_shape=shape)
@@ -189,12 +203,20 @@ def _invalid_fraction(
         valid = data[~bad]
         if valid.size:
             lo, hi = min(lo, float(valid.min())), max(hi, float(valid.max()))
+        if plausible_range is not None:
+            plo, phi = plausible_range
+            implausible = ~bad & ((data < plo) | (data > phi))
+            any_implausible |= implausible
+            implausible_by_band.append(round(float(implausible.mean()), 6))
     out = {
         "invalid_fraction": round(float(any_bad.mean()), 6),
         "invalid_fraction_by_band": by_band,
         "value_range": [lo, hi] if lo <= hi else None,
         **sampling,
     }
+    if plausible_range is not None:
+        out["implausible_fraction"] = round(float(any_implausible.mean()), 6)
+        out["implausible_fraction_by_band"] = implausible_by_band
     if sampling["nodata_source"] is None:
         out["zero_fill_fraction"] = round(float(all_zero.mean()), 6)
     return out
@@ -318,12 +340,15 @@ def describe(
         assumed = declared.get("nodata") if src.nodata is None else None
         if read_stats:
             stats = _invalid_fraction(src, max_pixels=max_stat_pixels,
-                                      assumed_nodata=assumed)
+                                      assumed_nodata=assumed,
+                                      plausible_range=declared.get("plausible_range"))
             obs["invalid_fraction"] = stats.pop("invalid_fraction")
             obs["invalid_fraction_by_band"] = stats.pop("invalid_fraction_by_band")
             obs["value_range"] = stats.pop("value_range")
-            if "zero_fill_fraction" in stats:
-                obs["zero_fill_fraction"] = stats.pop("zero_fill_fraction")
+            for key in ("zero_fill_fraction", "implausible_fraction",
+                        "implausible_fraction_by_band"):
+                if key in stats:
+                    obs[key] = stats.pop(key)
             obs["invalid_fraction_sampling"] = stats
         layer.update(obs)
         prov.observed = obs

@@ -17,6 +17,10 @@ set -euo pipefail
 YEAR=${1:-2019}
 
 source "$HOME/eocube/scripts/stage_env.sh"
+# GDAL prints a JSON summary of bytes read over HTTP at exit: the S1/S2 transfer
+# volume, to compare with PLAN.md's estimate. (DANS files are whole downloads, so
+# their transfer equals their stored size.)
+export CPL_VSIL_SHOW_NETWORK_STATS=YES
 echo "node: $(hostname)   year: $YEAR   started: $(date -Is)"
 python "$HOME/eocube/experiments/open_cube/fetch_year.py" \
     --year "$YEAR" --out "$HOME/work/data/raw/open_cube" --workers "$SLURM_CPUS_PER_TASK"

@@ -189,3 +189,21 @@ def test_temporal_gate_without_times_is_reported_not_omitted():
 def test_skipped_temporal_gate_is_absent():
     rep = run_all_gates([L("a")], skip=["temporal_alignment"])
     assert "temporal_alignment" not in [r.gate for r in rep.results]
+
+# physically implausible values that read as data (Sentinel-2 swath edge, 2019-06-25)
+def test_implausible_above_tolerance_refuses():
+    r = check_quality_missingness([L("b02", plausible_range=(50, 12000), implausible_fraction=0.3)])
+    assert r.verdict is Verdict.REFUSE
+
+def test_implausible_within_tolerance_is_a_decision():
+    r = check_quality_missingness([L("b02", plausible_range=(50, 12000), implausible_fraction=0.004)])
+    assert r.verdict is Verdict.PASS_WITH_DECISION
+    assert r.evidence["per_layer"]["b02"]["implausible_fraction"] == 0.004
+
+def test_implausible_tolerance_is_configurable_through_run_all_gates():
+    layer = L("b02", plausible_range=(50, 12000), implausible_fraction=0.03)
+    assert not run_all_gates([layer]).ok
+    assert run_all_gates([layer], max_implausible_fraction=0.05).ok
+
+def test_layer_without_plausible_range_is_unaffected():
+    assert check_quality_missingness([L("a")]).verdict is Verdict.PASS

@@ -14,7 +14,7 @@
 # A venv is thousands of small files, which Lustre handles badly. So the venv is built
 # in node-local /tmp and packed into ONE file, ~/envs/eocube.tar; each job unpacks it
 # to the same /tmp path (a venv only works at the path it was built at) via
-# scripts/env_activate.sh. If the node has no usable local /tmp, this falls back to a
+# scripts/stage_env.sh. If the node has no usable local /tmp, this falls back to a
 # plain venv on Lustre at ~/envs/eocube and says so.
 #
 # Also records what the fetch job depends on: outbound internet from compute nodes.

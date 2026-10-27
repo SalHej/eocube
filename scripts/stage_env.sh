@@ -1,4 +1,4 @@
-# Source at the top of a Slurm job:   source ~/eocube/scripts/env_activate.sh
+# Source at the top of a Slurm job:   source ~/eocube/scripts/stage_env.sh
 #
 # Unpacks the environment built by setup_env.sbatch (~/envs/eocube.tar) into
 # node-local /tmp, at the same path it was built at, and activates it. Unpacks
@@ -19,7 +19,7 @@ if [ -f "$_packed" ]; then
 elif [ -x "$HOME/envs/eocube/bin/python" ]; then
     source "$HOME/envs/eocube/bin/activate"
 else
-    echo "env_activate.sh: no environment found; run scripts/setup_env.sbatch first" >&2
+    echo "stage_env.sh: no environment found; run scripts/setup_env.sbatch first" >&2
     return 1 2>/dev/null || exit 1
 fi
 unset _local _packed

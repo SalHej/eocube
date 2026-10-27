@@ -81,12 +81,12 @@ handles small-file metadata badly, so the venv is kept on Lustre as **one file**
   node-local `/tmp/$USER/eocube-venv`, installs `eocube[dev,ml,raster]` (no torch,
   editable from `~/eocube`), runs the test suite, then packs the venv into
   **`~/envs/eocube.tar`**.
-- **Use:** every job starts with `source ~/eocube/scripts/env_activate.sh`. That
+- **Use:** every job starts with `source ~/eocube/scripts/stage_env.sh`. That
   unpacks the tarball to the same `/tmp` path (a venv only works at the path it was
   built at), only if the node lacks an up-to-date copy, then activates it.
 - **Fallback:** if a compute node's `/tmp` is a network filesystem or has under 3 GB
   free, the build job makes a plain venv on Lustre at `~/envs/eocube` and logs that
-  it did. `env_activate.sh` then uses that instead.
+  it did. `stage_env.sh` then uses that instead.
 - **Rejected:** a container. Building images needs `--fakeroot`, which this account
   lacks.
 
@@ -95,8 +95,40 @@ Build:
 cd ~/work/logs && sbatch -A mif76448_mif ~/eocube/scripts/setup_env.sbatch
 ```
 
-**Pending:** the result of the first build (node `/tmp` type and size, venv file count,
-test result).
+**First build: job 247519, node-25, 2026-10-27, 39 s elapsed, 2.6 CPU-minutes.**
+
+| Item | Result |
+|---|---|
+| Compute-node internet | Planetary Computer, DANS and PyPI all return HTTP 200 |
+| Node-local `/tmp` | `/dev/nvme0n1`, xfs, 1.5 TB free on node-25 (it varies by node; 195 GB reported elsewhere). Not Lustre |
+| Packages | Python 3.12.3, numpy 2.5.4, rasterio 1.5.2 (bundled GDAL 3.12.2), scikit-learn 1.9.1, from manylinux wheels |
+| venv | 8,365 files, 434 MB, packed to **one file**: `~/envs/eocube.tar` (443 MB) |
+| Tests | **87 passed, 2 skipped** (the laptop has 101) |
+
+The 2 skips are whole modules, `tests/test_experiment_configs.py` (5 tests) and
+`tests/test_run_ablation.py` (8 tests), which `importorskip("yaml")`. **PyYAML is in no
+eocube extra.** The laptop happened to have it, while this clean environment does not.
+Until it is added (needs approval), YAML experiment configs cannot be loaded on the
+cluster, and those 13 tests do not run here.
+
+Python 3.12 also warns that `datetime.utcnow()` in `eocube/io.py` is deprecated.
+It is harmless for now.
+
+Activate in any job:
+```bash
+source ~/eocube/scripts/stage_env.sh      # unpacks to /tmp/$USER/eocube-venv if needed
+```
+
+## Job templates
+
+| Script | Purpose | Resources |
+|---|---|---|
+| `scripts/setup_env.sbatch` | Build the packed venv; run the tests | `main`, 4 CPU, 8 GB, 30 min |
+| `scripts/fetch_year.sbatch <year>` | One year of the open cube into `~/work/data/raw/open_cube/<year>` (resumable) | `main`, 8 CPU, 16 GB, 4 h |
+| `scripts/train.sbatch` | Older template from v0.3; still points at the project directory, which is not accessible | — |
+
+Submit from `~/work/logs` so the logs land there, and pass the account:
+`sbatch -A mif76448_mif <script>`.
 
 ## Slurm
 

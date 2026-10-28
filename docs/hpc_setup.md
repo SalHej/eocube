@@ -163,4 +163,42 @@ Submit from `~/work/logs` so the logs land there, and pass the account:
 
 ## What was fetched
 
-**Pending:** Step 4 (2019, all 17 stations, full year).
+### 2019, all 17 stations, full year
+
+Job 247545, `main`, 8 CPU, `node-25`, 2026-10-27. Submitted `--dependency=afterok`
+on the environment rebuild (job 247544: 117 passed), so a broken environment could not
+start it. **COMPLETED in 33 min 40 s; 4.5 CPU-hours.**
+
+Output: `~/work/data/raw/open_cube/2019/{s1,s2,ground_truth}/<station>/`, with every
+file and every skip in `manifest.jsonl`.
+
+| | Estimate (PLAN.md) | Actual |
+|---|---|---|
+| **Transferred** | ~15 GB (~16 GB once S2 read several tiles) | **18.9 GB**: 17.47 GB S1+S2 (GDAL network stats, 30,690 GETs) + 1.41 GB DANS CSVs |
+| **Stored, file bytes** | 2.1 GB | **1.86 GB**: S1 294 MB (est. 286), S2 151 MB (est. 172), ground truth 1.41 GB (est. 1.66, which assumed 20 stations) |
+| **Stored, on disk** | — | **617 MB**: Lustre compresses the CSVs on disk |
+
+**Why more was transferred than estimated:** tile choice reads B02 and SCL from every
+tile containing a station before choosing one (docs/examples/swath_edges.md). Scale
+2017–2020 as **≈ 75 GB transferred, ≈ 7.5 GB stored**, not 53 / 3.5.
+
+**What came back:**
+- **S1:** 3,977 of 3,978 station-passes (7,954 files).
+  - The 1 skip is ITCSM_16 on 2019-03-23, 111 m outside every frame's footprint
+    (`no_frame`).
+  - 11 used a second frame.
+  - 54 chips are partly nodata around a valid station pixel, 12 of them over 30%.
+- **S2:** 2,118 station-dates (14,826 files).
+  - 12 are tagged `station_measured: false` (edge or fill at the station).
+  - 313 station-dates have `no_measurement`.
+  - **ITCSM_01, 04, 07 and 09 each lack 71 of 143 dates, and ITCSM_08 lacks 25.** One
+    S2 orbit's swath does not reach the east of the network. See PLAN.md before cube
+    assembly.
+- **Ground truth:** 35 files (17 stations × `_cd`/`_fg`, plus the locations sheet).
+- **Mixed CRS, as planned:**
+  - S1: 5,948 files in EPSG:32632, 2,006 in 32631.
+  - S2: 14,287 in 32632, 539 in 32631.
+  - S2 tiles chosen: 32ULC 1,198, 32ULD 843, 31UGU 42, 31UGT 35.
+
+Copies of `manifest.jsonl` and the job log were taken to the laptop for analysis
+(metadata only; no imagery leaves the cluster).

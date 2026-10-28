@@ -221,6 +221,64 @@ gate is ⚠️ expected to clear it.
 Raam (15 stations, CC0) is **on hold.** If it is ever pooled, the catchment must be a
 held-out fold, and that decision is taken on its own merits, not to rescue power.
 
+## Block design: east/west Sentinel-2 coverage
+
+**Decision (2026-10-28): stratified spatial blocks.** Each of the 4 folds contains
+exactly one of the four low-coverage stations (ITCSM_01, 04, 07, 09). The other 13
+stations form 4 spatial k-means blocks. This replaces plain spatial k=4 blocks.
+Reproduce with `eastwest_blocks.py --manifest <2019 manifest.jsonl>`, run beside
+`sm_stats.py`'s output.
+
+**The problem.** One Sentinel-2 orbit's swath does not reach the east of the network.
+In 2019, ITCSM_01, 04, 07 and 09 have S2 on 71–72 of 143 dates (ITCSM_08: 115). For
+each S1 pass, the age of the most recent usable S2 observation at or before it:
+
+| | Mean | Median | 90th pct | Within 2 days |
+|---|---|---|---|---|
+| East (4 stations) | **2.66 d** | 2.79 d | 4.79 d | ~40% |
+| Other 13 | **1.41 d** | 1.27 d | 2.79 d | ~80% |
+| Ratio | **1.88** | | | |
+
+Plain spatial blocks put 3 of the 4 eastern stations in one fold, so mean S2 age
+differs across folds by **0.78–1.28 d**. A temporal-gate effect in that fold would be
+confounded with geography.
+
+**The three designs** (5 block partitions; power proxy as in "Power check"):
+
+| Design | Stations / folds | Age spread across folds | Nearest training station to a test station | Paired ΔR², absolute / anomaly | Absolute R² across partitions (sd) |
+|---|---|---|---|---|---|
+| Plain spatial k=4 | 17 / 4 | 0.78–1.28 d | median 11–15 km, min 6.3 km | 0.062 ± 0.030 / 0.235 ± 0.047 | 0.020 |
+| Drop the four | 13 / 4 (2–6 per fold) | 0.12 d | median 10.6–13.3 km, min 8.3 km | 0.062 ± 0.027 / 0.223 ± 0.028 | 0.364 |
+| **Stratify** | **17 / 4 (3–7 per fold)** | **0.13 d** | median 8.6–9.5 km, min 4.8 km | **0.061 ± 0.027 / 0.232 ± 0.034** | 0.233 |
+| Report separately | 17 / 4, unchanged | 0.78–1.28 d, unchanged | as plain | as plain | 0.020 |
+
+**Why stratify, not drop, although both reduce the confound almost equally**
+(0.13 d vs 0.12 d):
+
+- **What dropping removes.** The four stations dropped are those with the oldest
+  optical data, the cases the temporal gate exists for. Dropping them would remove its
+  strongest test, in a study of whether temporal alignment matters, and would confine
+  every conclusion to the west of the network.
+- **What stratifying costs.** Dropping keeps test stations further from training
+  (minimum 8.3 km vs 4.8 km), so it is the better design for spatial independence.
+  Stratifying accepts closer neighbours. In the proxy this did not inflate R² (absolute
+  0.318 vs 0.364 plain; anomaly 0.468 vs 0.470), and the paired-ΔR² noise fell.
+- **Neither design makes absolute R² levels interpretable.** They vary across partitions
+  by 0.233 (stratify) and 0.364 (drop). That reinforces the earlier decision: the
+  primary result is the paired per-fold ΔR², not R² levels.
+- **Report separately** keeps the confound in the pooled result, so it is not a design.
+  It becomes the secondary analysis below.
+
+**Caveat: both the proxy and the S2 ages ignore clouds.** The ages count S2
+acquisitions available at the station, not cloud-free ones; clouds will lengthen the
+gaps everywhere, by an unknown and possibly unequal amount. The power proxy uses
+in-situ neighbours, not satellite features. **The real numbers will differ.** Both
+are recomputed from the assembled cube before the ablation runs.
+
+**Secondary analysis (planned):** paired ΔR² per station, reported for the four
+eastern stations against the other 13. This is a **descriptive** breakdown, labelled
+in the write-up as **resting on 4 stations**, with no claim of significance.
+
 ## Download size and placement
 
 **Where data lives.** On the laptop, `data/` in the repo is a directory junction to

@@ -502,3 +502,30 @@ def test_plausible_range_upper_bound_only(make_tif):
     data[0, :] = 60000
     layer = describe(make_tif("x", data, dtype="uint16"), declared={"plausible_range": (None, 12000)})
     assert layer["implausible_fraction"] == pytest.approx(0.1)
+
+
+def _quality_gate(layer):
+    return run_all_gates([layer], skip=["geometry_crs", "resolution", "temporal_alignment",
+                                        "sensor_physics"]).results[0]
+
+
+def test_strong_reflector_does_not_trigger_plausibility(make_tif):
+    data = np.full((10, 10), 0.05, dtype="float32")
+    data[0, 0] = 1043.0                       # building / corner reflector: real
+    g = _quality_gate(describe(make_tif("vv", data), "S1_VV",
+                               declared={"plausible_range": (1e-5, None)}))
+    assert g.verdict is Verdict.PASS
+    assert not any("physical range" in m for m in g.reasons + g.decisions)
+
+
+def test_sub_threshold_fill_triggers_plausibility(make_tif):
+    data = np.full((10, 10), 0.05, dtype="float32")
+    data[0, 0] = 1e-7                         # fill below the lower bound, nodata unset
+    g = _quality_gate(describe(make_tif("vv", data), "S1_VV",
+                               declared={"plausible_range": (1e-5, None)}))
+    assert g.verdict is Verdict.PASS_WITH_DECISION       # 1% of pixels: at the tolerance
+    assert any("outside its declared physical range" in d for d in g.decisions)
+    data[:5, :] = 0.0                                    # 50% fill
+    g = _quality_gate(describe(make_tif("vv2", data), "S1_VV",
+                               declared={"plausible_range": (1e-5, None)}))
+    assert g.verdict is Verdict.REFUSE

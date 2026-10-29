@@ -269,11 +269,49 @@ confounded with geography.
 - **Report separately** keeps the confound in the pooled result, so it is not a design.
   It becomes the secondary analysis below.
 
-**Caveat: both the proxy and the S2 ages ignore clouds.** The ages count S2
-acquisitions available at the station, not cloud-free ones; clouds will lengthen the
-gaps everywhere, by an unknown and possibly unequal amount. The power proxy uses
-in-situ neighbours, not satellite features. **The real numbers will differ.** Both
-are recomputed from the assembled cube before the ablation runs.
+**Caveat (as of 2026-10-28): both the proxy and the S2 ages above ignore clouds.**
+They count S2 acquisitions available at the station, not usable ones. **The figures
+above are the prior estimate.** They are kept so the change is traceable. The decision
+now rests on the cloud-aware re-check below.
+
+### Re-checked with clouds applied (2026-10-29, the 2019 cube, job 247673)
+
+**Ages.** S2 age is now the age of the newest S2 observation that is **usable at the
+station pixel** (SCL 4/5, B02 ≥ 50, not edge-flagged) at or before each S1 pass, over
+the cube's 3,505 samples (docs/cube_2019.md):
+
+| | Prior (availability only) | **Cloud-aware** |
+|---|---|---|
+| East (4 stations) mean S2 age | 2.66 d | **9.53 d** (median 7.80) |
+| Other 13 | 1.41 d | **6.78 d** (median 4.80) |
+| Ratio | 1.88 | **1.41** |
+| Absolute gap | 1.25 d | **2.75 d** |
+
+**Cross-fold spread of mean S2 age** (same partitions as above):
+
+| Design | Prior | **Cloud-aware** |
+|---|---|---|
+| Plain spatial k=4 | 0.78–1.28 d | **1.23–3.19 d** |
+| Drop the four | 0.12 d | **1.30 d** |
+| **Stratify** | 0.13 d | **0.53–1.08 d** |
+
+**The decision holds, and its justification changes in two ways:**
+
+1. **The ratio narrowed (1.88 → 1.41).** The eastern stations' relative disadvantage
+   is smaller than the availability-only figures suggested, because clouds lengthen
+   every station's wait. The absolute gap more than doubled (1.25 → 2.75 d). The
+   absolute gap is what the temporal gate's window acts on, so the confound is larger
+   in the unit that matters.
+2. **Dropping no longer matches stratifying on the confound.** Without clouds, dropping
+   the four left a 0.12 d spread; with clouds it leaves 1.30 d, because cloud
+   frequency also varies among the western stations. **Stratifying gives the smallest
+   spread, 0.53–1.08 d.** So it is chosen on the confound as well as on what dropping
+   removes. The "nearly equal confound reduction" premise of 2026-10-28 does not
+   survive the cloud-aware figures.
+
+The power proxy above still ignores clouds and uses in-situ neighbours, not satellite
+features. It is not recomputed here; its role was to set the detection limit, and that
+is re-examined when the ablation runs.
 
 **Secondary analysis (planned):** paired ΔR² per station, reported for the four
 eastern stations against the other 13. This is a **descriptive** breakdown, labelled

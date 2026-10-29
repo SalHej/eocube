@@ -25,8 +25,13 @@ Each fold is scored twice:
           predicting the same targets. Paired dR2 = arm - baseline on that set. This is
           the primary result (PLAN.md, "Power check", decision 2). Negative means
           removing the gate hurt, i.e. the gate was doing useful work.
-Both on the absolute target and on the anomaly target (minus each station's monthly
-mean over the cube's samples; an evaluation metric only, never a model input).
+Both on the absolute target and on anomalies: target and prediction each minus their
+own station-month mean over the scored samples. That scores whether the model tracks
+moisture changes within a station and month, separately from soil type and season
+(PLAN.md, "Power check", decision 3). Evaluation only, never a model input. Subtracting
+one climatology from both target and prediction instead would leave the residual
+unchanged and only shrink the denominator: the first run did that, and reported
+anomaly R2 of -22.
 """
 
 from __future__ import annotations
@@ -64,6 +69,16 @@ def r2(y, p) -> float:
     return 1.0 - float(np.sum((y - p) ** 2)) / ss if ss > 0 else float("nan")
 
 
+def anom_r2(y, p, groups) -> float:
+    """R2 after removing each station-month mean from target and prediction separately."""
+    ya, pa = y.copy(), p.copy()
+    for g in np.unique(groups):
+        m = groups == g
+        ya[m] -= y[m].mean()
+        pa[m] -= p[m].mean()
+    return r2(ya, pa)
+
+
 def load(cube: Path):
     rows = list(csv.DictReader(open(cube / "samples.csv", encoding="utf-8")))
     per = json.load(open(cube / "gates.json"))["per_sample"]
@@ -71,14 +86,11 @@ def load(cube: Path):
     X = np.array([[float(r[f]) for f in FEATURES] for r in rows])
     y = np.array([float(r["sm"]) for r in rows])
     stn = np.array([r["station"] for r in rows])
-    month = np.array([datetime.fromisoformat(r["s1_time"]).month for r in rows])
-    clim = collections.defaultdict(list)
-    for s, m, v in zip(stn, month, y):
-        clim[(s, m)].append(v)
-    c = np.array([st.mean(clim[(s, m)]) for s, m in zip(stn, month)])
+    sm_group = np.array([f"{r['station']}-{datetime.fromisoformat(r['s1_time']).month:02d}"
+                         for r in rows])
     refused = {g: np.array([p[k] == "refuse" for p in per]) for g, k in GATES.items()}
     refused_grid = np.array([p["geometry_crs"] == "refuse" for p in per])
-    return X, y, c, stn, refused, refused_grid
+    return X, y, sm_group, stn, refused, refused_grid
 
 
 def arms(refused, refused_grid) -> dict[str, tuple[str | None, np.ndarray]]:
@@ -102,7 +114,7 @@ def main():
     a = ap.parse_args()
     out = a.out.expanduser()
     out.mkdir(parents=True, exist_ok=True)
-    X, y, clim, stn, refused, refused_grid = load(a.cube.expanduser())
+    X, y, grp, stn, refused, refused_grid = load(a.cube.expanduser())
     A = arms(refused, refused_grid)
     names = sorted(set(stn))
     west = [n for n in names if n not in EAST]
@@ -129,11 +141,11 @@ def main():
                        "n_train": int((kept & ~test).sum()), "n_test_own": int(own.sum()),
                        "n_test_paired": int(pair.sum()),
                        "r2_own": r2(y[own], pred[arm][own]),
-                       "r2_anom_own": r2(y[own] - clim[own], pred[arm][own] - clim[own]),
+                       "r2_anom_own": anom_r2(y[own], pred[arm][own], grp[own]),
                        "r2_paired": r2(y[pair], pred[arm][pair]),
-                       "r2_anom_paired": r2(y[pair] - clim[pair], pred[arm][pair] - clim[pair]),
+                       "r2_anom_paired": anom_r2(y[pair], pred[arm][pair], grp[pair]),
                        "r2_paired_baseline": r2(y[pair], pred[BASELINE][pair]),
-                       "r2_anom_paired_baseline": r2(y[pair] - clim[pair], pred[BASELINE][pair] - clim[pair]),
+                       "r2_anom_paired_baseline": anom_r2(y[pair], pred[BASELINE][pair], grp[pair]),
                        "r2_null": r2(y[pair], null[pair]),
                        "per_station": {}}
                 rec["d_r2"] = rec["r2_paired"] - rec["r2_paired_baseline"]

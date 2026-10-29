@@ -137,6 +137,8 @@ def check_geometry_crs(
     *,
     require_identical_crs: bool = True,
     max_grid_offset_px: float = 0.1,
+    mode: str = "grid",
+    max_point_offset_m: float | None = None,
 ) -> GateResult:
     """Verify reprojection correctness and pixel-grid co-registration.
 
@@ -150,12 +152,23 @@ def check_geometry_crs(
 
     The failure prevented is sub-pixel misregistration, which silently degrades
     fusion and is then attributed to the model architecture rather than the data.
+
+    ``mode="point"`` is for cubes that are not image stacks: each layer is read at
+    its own pixel containing one ground point, in its own CRS, with no common grid
+    and no resampling. Grid agreement is then the wrong question; coordinate
+    agreement is the right one. See :func:`_check_point`. Grid mode remains the
+    default; choosing point mode is a statement about the method, recorded in the
+    provenance log every time.
     """
     res = GateResult(gate="geometry_crs", verdict=Verdict.PASS)
     if not layers:
         res.verdict = Verdict.REFUSE
         res.reasons.append("no layers supplied")
         return res
+    if mode == "point":
+        return _check_point(layers, res, max_point_offset_m)
+    if mode != "grid":
+        raise ValueError(f"geometry mode must be 'grid' or 'point', not {mode!r}")
 
     crs_set = {str(l.get("crs")) for l in layers}
     res.evidence["crs_observed"] = sorted(crs_set)
@@ -191,6 +204,89 @@ def check_geometry_crs(
                 f"{max_grid_offset_px} px; co-registration is not verified"
             )
     res.evidence["subpixel_offsets"] = offsets
+    return res
+
+
+def _ground_m(a: Sequence[float], b: Sequence[float]) -> float:
+    """Haversine distance in metres between two (lon, lat) points."""
+    p1, p2 = math.radians(a[1]), math.radians(b[1])
+    h = (math.sin((p2 - p1) / 2) ** 2
+         + math.cos(p1) * math.cos(p2) * math.sin(math.radians(b[0] - a[0]) / 2) ** 2)
+    return 2 * 6371008.8 * math.asin(math.sqrt(h))
+
+
+def _check_point(layers, res: GateResult, max_point_offset_m: float | None) -> GateResult:
+    """Point-mode geometry: every layer read at the same ground point, consistently.
+
+    Each layer must carry a declared ``sample_point`` (lon, lat) and the observed
+    ``sample_pixel`` that :func:`eocube.io.describe` records for it. The gate refuses
+    if:
+      - a layer has no CRS, or lacks either field;
+      - the layers declare different sample points (more than 1 m apart), i.e. they
+        were read for different locations;
+      - the point lies outside a layer;
+      - a layer's sampled pixel centre is further from the point than half its pixel
+        diagonal. That is impossible if the CRS and transform were handled
+        correctly, so it means they were not.
+    Mixed CRS are allowed: that is the point of the mode. The largest distance
+    between any two layers' sampled pixel centres is reported. If
+    ``max_point_offset_m`` is given, a larger spread is refused: different-sized
+    pixels at the same point average over different ground.
+    """
+    res.evidence["mode"] = "point"
+    res.evidence["crs_observed"] = sorted({str(l.get("crs")) for l in layers})
+    centres, offsets = {}, {}
+    for l in layers:
+        name, sp, px = l["name"], l.get("sample_point"), l.get("sample_pixel")
+        if not l.get("crs"):
+            res.verdict = Verdict.REFUSE
+            res.reasons.append(f"layer '{name}' has an undeclared CRS")
+            continue
+        if sp is None or px is None:
+            res.verdict = Verdict.REFUSE
+            res.reasons.append(
+                f"layer '{name}' lacks sample_point/sample_pixel; point mode needs "
+                "describe(..., declared={'sample_point': (lon, lat)})")
+            continue
+        if not px.get("inside"):
+            res.verdict = Verdict.REFUSE
+            res.reasons.append(f"sample point {list(sp)} lies outside layer '{name}'")
+            continue
+        gsd = l.get("gsd_ground_m") or ([l["gsd"]] * 2 if l.get("gsd_units", "metre") == "metre"
+                                        else None)
+        if gsd:
+            half_diag = 0.5 * math.hypot(*gsd) + 0.01
+            if px["offset_m"] > half_diag:
+                res.verdict = Verdict.REFUSE
+                res.reasons.append(
+                    f"layer '{name}': the pixel read is centred {px['offset_m']:.2f} m from the "
+                    f"sample point, more than its half-diagonal ({half_diag:.2f} m); the CRS "
+                    "or transform was not applied consistently")
+        centres[name], offsets[name] = px["centre_lonlat"], px["offset_m"]
+    points = {tuple(l["sample_point"]) for l in layers if l.get("sample_point") is not None}
+    if len(points) > 1:
+        pts = list(points)
+        spread = max(_ground_m(a, b) for a in pts for b in pts)
+        if spread > 1.0:
+            res.verdict = Verdict.REFUSE
+            res.reasons.append(
+                f"layers declare {len(points)} different sample points, up to {spread:.1f} m "
+                "apart; they were read for different locations")
+    names = list(centres)
+    pair = max((_ground_m(centres[a], centres[b]) for a in names for b in names), default=0.0)
+    res.evidence["centre_offset_from_point_m"] = offsets
+    res.evidence["max_pairwise_centre_m"] = round(pair, 3)
+    if max_point_offset_m is not None and pair > max_point_offset_m:
+        res.verdict = Verdict.REFUSE
+        res.reasons.append(
+            f"sampled pixel centres are up to {pair:.1f} m apart, above the "
+            f"{max_point_offset_m} m tolerance")
+    if res.verdict is Verdict.PASS:
+        res.verdict = Verdict.PASS_WITH_DECISION
+    res.decisions.append(
+        f"point sampling: each of {len(layers)} layers read at its own pixel containing "
+        f"the sample point, in {len(res.evidence['crs_observed'])} CRS, with no common grid "
+        f"and no resampling; sampled pixel centres up to {pair:.1f} m apart")
     return res
 
 
@@ -664,6 +760,8 @@ def run_all_gates(
                 layers,
                 require_identical_crs=kwargs.get("require_identical_crs", True),
                 max_grid_offset_px=kwargs.get("max_grid_offset_px", 0.1),
+                mode=kwargs.get("geometry_mode", "grid"),
+                max_point_offset_m=kwargs.get("max_point_offset_m"),
             )
         )
     if "resolution" not in skip:

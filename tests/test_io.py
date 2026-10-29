@@ -426,3 +426,58 @@ def test_declared_range_without_stats_is_unmeasured_not_clean(make_tif):
     gate = rep.results[0]
     assert gate.verdict is Verdict.PASS_WITH_DECISION
     assert any("plausible range" in d and "not measured" in d for d in gate.decisions)
+
+
+# --------------------------------------------------------------------------
+# point-mode geometry: a value per sensor at a known coordinate, not an image stack
+# --------------------------------------------------------------------------
+STATION = (6.745, 52.13583)                  # ITCSM_08
+
+
+def _around(make_tif, name, crs, res, n=10):
+    from rasterio.warp import transform as tr
+    x, y = tr("EPSG:4326", crs, [STATION[0]], [STATION[1]])
+    return make_tif(name, np.ones((n, n)), crs=crs, res=(res, res),
+                    origin=(x[0] - res * n / 2, y[0] + res * n / 2))
+
+
+def test_describe_records_sample_pixel(make_tif):
+    p = _around(make_tif, "s1", "EPSG:32632", 10)
+    layer = describe(p, declared={"sample_point": STATION})
+    px = layer["sample_pixel"]
+    assert px["inside"] and px["offset_m"] <= 0.5 * math.hypot(10, 10)
+    assert layer["provenance"]["declared"]["sample_point"] == STATION
+
+
+def test_mixed_crs_point_cube_refused_in_grid_mode_accepted_in_point_mode(make_tif):
+    """The Twente case: S1 on EPSG:32632 at 10 m, S2 on 32631 at 20 m, one station."""
+    s1 = describe(_around(make_tif, "s1", "EPSG:32632", 10), "S1", declared={"sample_point": STATION})
+    s2 = describe(_around(make_tif, "s2", "EPSG:32631", 20), "S2", declared={"sample_point": STATION})
+    grid = run_all_gates([s1, s2], skip=["resolution", "temporal_alignment",
+                                         "quality_missingness", "sensor_physics"])
+    assert grid.results[0].verdict is Verdict.REFUSE
+    point = run_all_gates([s1, s2], geometry_mode="point",
+                          skip=["resolution", "temporal_alignment", "quality_missingness",
+                                "sensor_physics"])
+    g = point.results[0]
+    assert g.verdict is Verdict.PASS_WITH_DECISION
+    assert "point sampling" in g.decisions[0]
+    assert g.evidence["max_pairwise_centre_m"] <= 0.5 * math.hypot(10, 10) + 0.5 * math.hypot(20, 20)
+
+
+def test_point_mode_refuses_layers_read_for_different_points(make_tif):
+    s1 = describe(_around(make_tif, "s1", "EPSG:32632", 10), "S1", declared={"sample_point": STATION})
+    other = (STATION[0] + 0.0005, STATION[1])                       # ~34 m east
+    s2 = describe(_around(make_tif, "s2", "EPSG:32631", 20), "S2", declared={"sample_point": other})
+    g = run_all_gates([s1, s2], geometry_mode="point").results[0]
+    assert g.verdict is Verdict.REFUSE
+    assert any("different sample points" in r for r in g.reasons)
+
+
+def test_point_mode_refuses_point_outside_layer(make_tif):
+    s1 = describe(_around(make_tif, "s1", "EPSG:32632", 10), "S1", declared={"sample_point": STATION})
+    far = make_tif("far", np.ones((10, 10)), crs="EPSG:32632")      # UTM origin far away
+    s2 = describe(far, "S2", declared={"sample_point": STATION})
+    g = run_all_gates([s1, s2], geometry_mode="point").results[0]
+    assert g.verdict is Verdict.REFUSE
+    assert any("outside layer 'S2'" in r for r in g.reasons)

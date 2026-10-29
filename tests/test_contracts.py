@@ -207,3 +207,34 @@ def test_implausible_tolerance_is_configurable_through_run_all_gates():
 
 def test_layer_without_plausible_range_is_unaffected():
     assert check_quality_missingness([L("a")]).verdict is Verdict.PASS
+
+# point-mode geometry (dict level)
+def P(name, crs, gsd, offset, centre=(6.745, 52.13583), point=(6.745, 52.13583), inside=True):
+    return L(name, crs=crs, gsd=gsd, sample_point=point,
+             sample_pixel={"inside": inside, "offset_m": offset, "centre_lonlat": list(centre)})
+
+def test_point_mode_requires_sample_fields():
+    r = check_geometry_crs([L("a"), L("b", crs="EPSG:32631")], mode="point")
+    assert r.verdict is Verdict.REFUSE
+    assert "lacks sample_point" in r.reasons[0]
+
+def test_point_mode_refuses_inconsistent_crs_handling():
+    r = check_geometry_crs([P("s1", "EPSG:32632", 10.0, 3.0),
+                            P("s2", "EPSG:32631", 20.0, 40.0)], mode="point")
+    assert r.verdict is Verdict.REFUSE                  # 40 m > half-diagonal of 20 m pixel
+    assert "not applied consistently" in r.reasons[0]
+
+def test_point_mode_optional_spread_tolerance():
+    layers = [P("s1", "EPSG:32632", 10.0, 3.0, centre=(6.745, 52.13583)),
+              P("s2", "EPSG:32631", 20.0, 9.0, centre=(6.74512, 52.13583))]   # ~8 m apart
+    assert check_geometry_crs(layers, mode="point").verdict is Verdict.PASS_WITH_DECISION
+    assert check_geometry_crs(layers, mode="point", max_point_offset_m=5).verdict is Verdict.REFUSE
+
+def test_grid_mode_is_still_the_default():
+    layers = [P("s1", "EPSG:32632", 10.0, 3.0), P("s2", "EPSG:32631", 20.0, 9.0)]
+    assert check_geometry_crs(layers).verdict is Verdict.REFUSE
+
+def test_unknown_geometry_mode_is_an_error():
+    import pytest
+    with pytest.raises(ValueError):
+        check_geometry_crs([L("a")], mode="stack")

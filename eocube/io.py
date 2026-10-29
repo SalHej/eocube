@@ -53,14 +53,15 @@ __all__ = [
 #: 0.4: gsd_units and ground GSD for geographic CRS, zero_fill_fraction, value_range,
 #:      declared nodata honoured when the file has none.
 #: 0.5: implausible_fraction against a declared plausible_range.
-DESCRIPTOR_VERSION = "eocube-cube-descriptor/0.5"
+#: 0.6: sample_pixel for a declared sample_point (point-sampled cubes).
+DESCRIPTOR_VERSION = "eocube-cube-descriptor/0.6"
 
 #: Fields that can be read from a raster, and therefore verified.
 OBSERVABLE = (
     "crs", "transform", "width", "height", "gsd", "gsd_units", "gsd_ground_m", "dtype",
     "nodata", "invalid_fraction", "invalid_fraction_by_band", "invalid_fraction_sampling",
     "zero_fill_fraction", "band_count", "value_range", "implausible_fraction",
-    "implausible_fraction_by_band",
+    "implausible_fraction_by_band", "sample_pixel",
 )
 
 #: Fields that cannot be derived from pixels and must be declared by the
@@ -69,7 +70,7 @@ OBSERVABLE = (
 DECLARED_ONLY = (
     "modality", "units", "calibrated", "terrain_corrected", "reflectance",
     "qa_mask_available", "qa_mask_applied", "acquisition_time", "sensor",
-    "processing_level", "plausible_range",
+    "processing_level", "plausible_range", "sample_point",
 )
 
 
@@ -123,6 +124,35 @@ def _ground_gsd_m(transform, height: int) -> tuple[float, float]:
     m_lon = (111412.84 * math.cos(lat) - 93.5 * math.cos(3 * lat)
              + 0.118 * math.cos(5 * lat))
     return round(abs(transform.a) * m_lon, 3), round(abs(transform.e) * m_lat, 3)
+
+
+def _sample_pixel(src, lon: float, lat: float) -> dict[str, Any]:
+    """Where a declared sample point falls in this raster, for point-mode geometry.
+
+    A point-sampled cube reads each layer at its own pixel containing the point, in
+    its own CRS, with no common grid. What must then agree is the ground location
+    each layer was read at. This records it: the pixel, whether the point is inside
+    the raster, and the pixel centre in lon/lat with its distance from the point, so
+    that :func:`eocube.check_geometry_crs` can compare layers without a geospatial
+    stack of its own.
+    """
+    from rasterio.warp import transform as _tr
+    x, y = _tr("EPSG:4326", src.crs, [lon], [lat])
+    row, col = src.index(x[0], y[0])
+    inside = 0 <= row < src.height and 0 <= col < src.width
+    cx, cy = src.xy(row, col)                  # pixel centre, in the raster's CRS
+    clon, clat = _tr(src.crs, "EPSG:4326", [cx], [cy])
+    return {"point_lonlat": [lon, lat], "row": int(row), "col": int(col), "inside": bool(inside),
+            "centre_lonlat": [float(clon[0]), float(clat[0])],
+            "offset_m": round(_ground_distance_m(lon, lat, clon[0], clat[0]), 3)}
+
+
+def _ground_distance_m(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
+    """Haversine distance in metres (spherical Earth; ample for pixel-scale offsets)."""
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl = p2 - p1, math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * 6371008.8 * math.asin(math.sqrt(a))
 
 
 def _invalid_fraction(
@@ -337,6 +367,9 @@ def describe(
                 )
         # A declared fill value is used only where the file declares none:
         # that fills a gap in the file's metadata rather than contradicting it.
+        point = declared.get("sample_point")
+        if point is not None:
+            obs["sample_pixel"] = _sample_pixel(src, *point)
         assumed = declared.get("nodata") if src.nodata is None else None
         if read_stats:
             stats = _invalid_fraction(src, max_pixels=max_stat_pixels,

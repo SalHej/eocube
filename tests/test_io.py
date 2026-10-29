@@ -481,3 +481,24 @@ def test_point_mode_refuses_point_outside_layer(make_tif):
     g = run_all_gates([s1, s2], geometry_mode="point").results[0]
     assert g.verdict is Verdict.REFUSE
     assert any("outside layer 'S2'" in r for r in g.reasons)
+
+
+def test_plausible_range_lower_bound_only(make_tif):
+    """S1 gamma0 has no physical upper bound to declare: strong scatterers reach ~1000
+    (linear) and are real. Only the lower bound catches fill; a guessed upper bound of 10
+    flagged real values in 1,128 of 3,505 Twente samples."""
+    data = np.full((10, 10), 0.05, dtype="float32")
+    data[0, 0] = 1043.0                       # a building: real, very bright
+    data[5:, :] = 0.0                         # fill masquerading as data (nodata unset)
+    layer = describe(make_tif("vv", data), declared={"plausible_range": (1e-5, None)})
+    assert layer["implausible_fraction"] == pytest.approx(0.5)     # the fill, not the building
+    bright = describe(make_tif("vv2", np.where(data == 0, 0.05, data).astype("float32")),
+                      declared={"plausible_range": (1e-5, None)})
+    assert bright["implausible_fraction"] == 0.0
+
+
+def test_plausible_range_upper_bound_only(make_tif):
+    data = np.full((10, 10), 100, dtype="uint16")
+    data[0, :] = 60000
+    layer = describe(make_tif("x", data, dtype="uint16"), declared={"plausible_range": (None, 12000)})
+    assert layer["implausible_fraction"] == pytest.approx(0.1)

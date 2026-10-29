@@ -193,6 +193,10 @@ def _invalid_fraction(
     where SCL claimed data and nodata (0) was not set. Nodata checks cannot see
     such a pixel; a physical bound can. The range is declared because only the
     caller knows the sensor, units and surface; the pixels alone cannot say.
+    Either bound may be ``None`` (unbounded on that side). Fill is usually small, so a
+    lower bound alone is often the right declaration: an upper bound guessed for SAR
+    (10, linear) flagged real strong scatterers (VV up to 1043) in 1,128 of 3,505
+    Twente samples.
     """
     h, w = src.height, src.width
     step = max(1, int(math.sqrt((h * w) / max_pixels)))
@@ -234,8 +238,13 @@ def _invalid_fraction(
         if valid.size:
             lo, hi = min(lo, float(valid.min())), max(hi, float(valid.max()))
         if plausible_range is not None:
-            plo, phi = plausible_range
-            implausible = ~bad & ((data < plo) | (data > phi))
+            plo, phi = plausible_range               # either bound may be None: unbounded
+            implausible = np.zeros(shape, dtype=bool)
+            if plo is not None:
+                implausible |= data < plo
+            if phi is not None:
+                implausible |= data > phi
+            implausible &= ~bad
             any_implausible |= implausible
             implausible_by_band.append(round(float(implausible.mean()), 6))
     out = {

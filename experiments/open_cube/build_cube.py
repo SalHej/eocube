@@ -65,10 +65,14 @@ LOOKBACK = timedelta(days=30)                # how far back an S2 observation is
 EAST = ("ITCSM_01", "ITCSM_04", "ITCSM_07", "ITCSM_09")
 
 #: Declared properties, from the products' documentation, not from the pixels.
-#: Plausible ranges are physical bounds (flagged guesses for S1; see docs/cube_2019.md).
+#: S1 plausible range: lower bound only. gamma0 below 1e-5 (-50 dB) is not a backscatter
+#: measurement, so near-zero fill is caught. There is no physical upper bound to declare:
+#: strong scatterers (buildings, corner reflectors) reach VV ~1000 linear (+30 dB). The
+#: first run declared an upper bound of 10, which flagged real values in 1,128 samples
+#: (docs/cube_2019.md).
 DECLARED_S1 = {"modality": "sar", "sensor": "Sentinel-1", "units": "linear", "calibrated": True,
                "terrain_corrected": True, "processing_level": "RTC gamma0",
-               "plausible_range": (1e-5, 10.0)}
+               "plausible_range": (1e-5, None)}
 DECLARED_S2 = {"modality": "multispectral", "sensor": "Sentinel-2", "reflectance": True,
                "processing_level": "L2A", "qa_mask_available": True, "qa_mask_applied": True,
                "plausible_range": (B02_FLOOR, 12000)}

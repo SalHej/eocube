@@ -27,8 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import power_check as pc  # noqa: E402  (loads the SM series and prints its own summary)
 
-#: Stations one S2 orbit's swath does not reach (71-72 of 143 dates in 2019).
-EAST = ["ITCSM_01", "ITCSM_04", "ITCSM_07", "ITCSM_09"]
+from blocks import EAST, stratified  # noqa: E402
 
 
 def s1_to_s2_age(manifest: Path) -> dict[str, list[float]]:
@@ -62,12 +61,6 @@ def s1_to_s2_age(manifest: Path) -> dict[str, list[float]]:
 def dist_km(a: str, b: str) -> float:
     (la1, lo1), (la2, lo2) = pc.LOC[a], pc.LOC[b]
     return math.hypot((la1 - la2) * 111.0, (lo1 - lo2) * 111.0 * math.cos(math.radians(52.3)))
-
-
-def stratified(west: list[str], seed: int) -> list[list[str]]:
-    """Spatial k=4 blocks of the well-covered stations, one EAST station added to each."""
-    wb = sorted(pc.kmeans(west, 4, seed), key=lambda b: st.mean(pc.LOC[s][1] for s in b))
-    return [sorted(b + [e]) for b, e in zip(wb, sorted(EAST, key=lambda s: pc.LOC[s][0]))]
 
 
 def describe(blocks, label, names, gaps):

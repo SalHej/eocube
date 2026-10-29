@@ -3,19 +3,16 @@
 Run after sm_stats.py, in the directory holding its sm_series_*.json files.
 See PLAN.md, "Power check", for the results and the decisions they fix.
 """
-import glob, json, math, random, statistics as st, sys
+import glob, json, math, statistics as st, sys
 from collections import defaultdict
 from datetime import datetime, timedelta
+from pathlib import Path
 sys.stdout.reconfigure(encoding="utf-8")
 
-LOC = {  # first-listed WGS84 location; relocations are within a few km at most
- "ITCSM_01": (52.41472, 6.96722), "ITCSM_02": (52.39000, 6.85722), "ITCSM_03": (52.35061, 6.78992),
- "ITCSM_04": (52.27167, 6.92111), "ITCSM_05": (52.27333, 6.69944), "ITCSM_06": (52.41389, 6.63667),
- "ITCSM_07": (52.37167, 6.96528), "ITCSM_08": (52.13583, 6.74500), "ITCSM_09": (52.14639, 6.84306),
- "ITCSM_10": (52.20000, 6.65944), "ITCSM_11": (52.23111, 6.55889), "ITCSM_12": (52.14028, 6.55972),
- "ITCSM_13": (52.19389, 6.41750), "ITCSM_14": (52.19167, 6.31722), "ITCSM_15": (52.30944, 6.61250),
- "ITCSM_16": (52.36781, 6.53525), "ITCSM_17": (52.42056, 6.54056), "ITCSM_18": (52.40528, 6.37991),
- "ITCSM_19": (52.33333, 6.33167), "ITCSM_20": (52.31889, 6.44861)}
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from blocks import LOC, kmeans  # noqa: E402  (re-exported for eastwest_blocks.py)
+
 SENSOR_RMSE = 0.025
 
 S = {}
@@ -61,18 +58,6 @@ print(f"  anomaly correlation between station pairs: median {st.median(cors):.2f
       f"(IQR {sorted(cors)[len(cors)//4]:.2f}-{sorted(cors)[3*len(cors)//4]:.2f}, {len(cors)} pairs)")
 
 # ---------------------------------------------------------------- spatial blocks
-def kmeans(names, k, seed):
-    rnd = random.Random(seed)
-    pts = {n: LOC[n] for n in names}
-    cent = [pts[n] for n in rnd.sample(names, k)]
-    for _ in range(50):
-        groups = defaultdict(list)
-        for n, p in pts.items():
-            groups[min(range(k), key=lambda j: (p[0]-cent[j][0])**2 + ((p[1]-cent[j][1])*0.61)**2)].append(n)
-        cent = [(st.mean(pts[n][0] for n in g), st.mean(pts[n][1] for n in g)) for g in groups.values()]
-        k = len(cent)
-    return list(groups.values())
-
 def r2(pairs):
     y = [a for a, _ in pairs]; my = st.mean(y)
     ss = sum((a-my)**2 for a in y)

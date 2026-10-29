@@ -317,6 +317,79 @@ is re-examined when the ablation runs.
 eastern stations against the other 13. This is a **descriptive** breakdown, labelled
 in the write-up as **resting on 4 stations**, with no claim of significance.
 
+## Decisions for the 2019 ablation (2026-10-29)
+
+Evidence: docs/cube_2019.md (cube job 247673, refusal inspection job 247675).
+
+### Geometry mode: point
+
+**Decision: the geometry gate runs in point mode for the 2019 study.** Each layer must
+have been read at the same declared ground point (pixel centre within half a pixel
+diagonal of it), wherever its grid lies.
+
+**Why.** This cube is a value per sensor at a known coordinate. Every S1 and S2
+feature is read at the station's own pixel, in each layer's own CRS; nothing is
+stacked or resampled onto a shared grid. Grid agreement is the wrong question for it.
+Grid mode asks whether the layers share one grid, and they do not need to. It refused
+**979 samples (27.9%)**, every sample whose S1 frame and S2 tile fall in different UTM
+zones, although the sampled pixel centres agree to 7.1 m at the median and 14.1 m at
+most. Point mode asks the question that can actually go wrong here: whether every
+sensor was read at the same place. It accepts all 3,505.
+
+Grid mode stays the library default. Point mode is the method change, and it is
+recorded with the cube. The ablation reports grid mode as a supplementary arm, to show
+what the design not chosen would have cost.
+
+**Flagged, not changed: the resolution gate makes the same image-stack assumption.**
+With no target GSD it defaults to the coarsest input (20 m) and records every 10 m
+layer as downsampled: 3,505 PASS_WITH_DECISION, 21,030 layer decisions. In this cube no
+resampling happens; each value is read at its native pixel. So the decision describes a
+grid cube that does not exist. It refuses nothing, so it does not change the samples,
+but its provenance record is wrong for a point cube. It may need a matching point
+treatment. That is a change to the method and is left for its own decision.
+
+### Quality bounds: kept exactly as declared
+
+**Decision: the B02 ≥ 50 floor and the 12,000 ceiling on the other S2 bands stay as
+declared for the ablation.** Both are known to be guesses that do not hold: the floor
+refuses dark winter vegetation, the ceiling refuses bright cloud (docs/cube_2019.md).
+
+**Why they are not changed:**
+- **The write-up should report what guessed bounds actually cost.** The ablation runs
+  on the bounds as they are, so the quality gate's refusals are measured, not
+  pre-empted.
+- **Changing a threshold because it refused data we wanted is the move CLAUDE.md
+  forbids** ("Do not weaken a gate to make data pass"). The S1 upper bound was
+  different: it was physically wrong (it flagged real strong reflectors), and was
+  replaced by the declared physics, not by a looser number.
+- **The floor also selects samples.** B02 ≥ 50 is used in fetch-time tile scoring and in
+  the per-pixel usability rule, as well as in the gate. Changing it would change which
+  S2 dates are usable, and so the sample set the ablation compares on.
+
+### Next open decision: station pixel or chip for quality
+
+**Open, not implemented: should the quality gate judge the 1 km chip, the station
+pixel, or both?** This is the next decision for this cube.
+
+**Evidence: the 110 quality refusals** (job 247675). They come from 24 S2 observations,
+mostly winter dates:
+
+| Trigger | Samples |
+|---|---|
+| B02 below 50 DN on > 1% of the chip | 102 |
+| an S2 band above 12,000 on > 1% of the chip | 5 (overlapping) |
+| a chip > 30% nodata (S1 frame edges) | 6 |
+
+**In all 110 the station pixel itself passed the per-pixel rules.** None is fill
+masquerading as data. The refusals are correct statements about other pixels in the
+chip, and irrelevant to the one pixel the sample uses. Conversely, a layer-level gate
+can pass a chip whose fill strip is the sample pixel (docs/examples/swath_edges.md).
+That case is now caught by the per-pixel rules at assembly, not by the gate.
+
+**Not implemented yet.** It is a change to the method, so it needs its own
+before-and-after: the same cube, gated both ways, with refusal counts and the ablation
+re-run. The 2019 ablation uses the chip-level gate as it stands.
+
 ## Download size and placement
 
 **Where data lives.** On the laptop, `data/` in the repo is a directory junction to
@@ -404,3 +477,7 @@ autumn and winter windows (e.g. 2019-11 and 2020-02) before Step 4 draws conclus
    arguably too long; this will be judged with data in Step 4.
 3. **dB:** the sensor-physics gate refuses additive arithmetic on dB. Whether any
    feature uses dB is a modelling choice, and will be declared, not hidden.
+4. **Quality at the station pixel or the chip** (next decision; see "Decisions for the
+   2019 ablation"). Evidence: the 110 chip-level refusals, all with a valid station
+   pixel.
+5. **The resolution gate's stack assumption** in a point cube (flagged, same section).

@@ -1,196 +1,199 @@
 # The 2019 open-cube ablation: leave one gate out
 
-Twente soil moisture, 2019, 3,505 samples at 17 stations (docs/cube_2019.md).
-Jobs 247693 (reported) and 247692 (same run, earlier anomaly metric; see "Corrections").
-Results: `~/work/results/open_cube/ablation_2019/ablation.json` on the cluster.
+Twente soil moisture, 2019: 3,505 samples at 17 stations, the cube documented in
+docs/cube_2019.md (job 247673). Ablation job **247696**. Results:
+`~/work/results/open_cube/ablation_2019/ablation.json` on the cluster.
 
-> **Detection limit: ΔR² ≈ 0.05.** Fold-to-fold noise in the paired delta is
-> ±0.03–0.05 (PLAN.md, "Power check"). Any gate whose effect falls below it is
-> **"below detection limit on this task"**, never "no effect". **On this run, no gate
-> clears it.**
+> **Detection limit: ΔR² ≈ 0.05** (PLAN.md, "Power check"). Any gate whose effect falls
+> below it is reported as **"below detection limit on this task"**, never as "no effect".
 >
-> **The ablation measures downstream impact, not validity.** A gate can protect
-> correctness without moving R², and here the downstream model has no skill on
-> held-out stations to begin with (see "Baseline comparison").
+> **This ablation measures downstream accuracy on one task. It does not measure
+> validity.** A gate can be protecting correctness without moving R² on a smooth
+> target: a misregistered layer, a leaked future scene or a cloud-filled pixel are
+> wrong whether or not a model's score notices.
 
-## Summary
+## Result
 
-- **Only the quality gate changed the sample set.** With point-mode geometry, it was
-  the only gate that refused any sample: **110 of 3,505 (3.1%)**. The other four arms
-  are **identical to the baseline**, sample for sample. They were not measured, and
-  there was nothing to measure.
-- **Removing the quality gate: ΔR² +0.033 ± 0.052 (absolute).** That is below the
-  detection limit on this task. Its sign is positive: the model scored slightly better
-  with the 110 samples back in training. That fits the finding that their station
-  pixels were valid (docs/cube_2019.md).
-- **The downstream model has no skill on held-out stations.** The baseline random forest
-  has a median fold R² of −0.07. It beats the training-mean predictor in 7 of 20 folds.
-  Within-station anomaly R² is −1 to −15. So neither the deltas nor the limit can be
-  read as they would be for a working model.
-- **The temporal gate was not tested.** It refuses nothing: it keeps and flags the
-  1,415 samples with S2 older than 7 days. The stratified block design was chosen to
-  protect exactly this gate's measurement.
+**No gate had a detectable effect on absolute R².** The quality gate is the only one
+whose removal changed anything. **Removing it changed paired ΔR² by +0.033 ± 0.052:
+below detection limit on this task.**
+
+**On anomaly R², removing the quality gate exceeded the limit: +0.193 ± 0.223.** That
+is in the direction of the gate costing accuracy: 16 of 20 folds improved when its 110
+refused samples were trained on. It is the over-rigid chip-level gate refusing samples
+whose station pixel was valid (docs/cube_2019.md), now measured as a cost. One
+qualification belongs with it, not instead of it: **both models score far below
+predicting no anomaly at all.** The gain is a reduction in the error of a model that
+does not track moisture (see "Baseline skill").
+
+**Geometry, resolution, temporal alignment and sensor physics refused no sample in this
+cube.** Their arms are the baseline, sample for sample, so each is below detection
+limit on this task in the plainest sense: **there was nothing to detect.** That holds
+for the temporal gate too: it keeps and flags the 1,415 samples with S2 older than
+7 days rather than refusing them.
 
 ## Setup
 
 | Item | Choice |
 |---|---|
-| Cube | 2019, job 247673: 3,505 samples, S1 VV/VH and S2 B02–B12 at the station pixel |
-| Gates | the five, run per sample on the real layers. **Geometry in point mode** (PLAN.md, "Geometry mode") |
-| Declared bounds | **as declared**: S1 ≥ 1e-5; B02 in [50, 12000]; other S2 bands in [0, 12000] (PLAN.md, "Quality bounds") |
-| Arms | baseline: keep a sample unless any gate refuses it. "Without *g*": ignore *g*'s refusals only. Supplementary: geometry in grid mode (not selected) |
-| Folds | **stratified spatial blocks**: 4 folds, one eastern station each (PLAN.md, "Block design"). Never a random split |
-| Seeds | **5 (0–4).** Each seed sets the block partition and the forest's random state |
-| Model | random forest, 300 trees (`eocube.baselines.make_random_forest`), on the 8 station-pixel features, same for every arm |
-| Primary metric | **paired ΔR²** per fold: the arm's model minus the baseline's model, on the test samples both accept |
-| Also reported | R² on the arm's own accepted test samples; anomaly R² (target and prediction each minus their station-month mean); the training-mean predictor |
-| Cost | 2 min 12 s on 4 CPUs per run (≈ 0.15 CPU-h); main partition, CPU only |
+| Cube | 2019, job 247673. One row per station and S1 pass. S1 VV/VH and S2 B02–B12 at the station pixel; 5 cm in-situ soil moisture |
+| Gates | all five, run per sample on the real layers when the cube was built. **Geometry in point mode** (PLAN.md, "Geometry mode") |
+| Bounds | **as declared**: S1 ≥ 1e-5; B02 in [50, 12000]; other S2 bands in [0, 12000] (PLAN.md, "Quality bounds") |
+| Arms | baseline: a sample is kept unless any gate refuses it. "Without *g*": *g*'s refusals are ignored, every other gate applies. Supplementary: geometry in grid mode, the design not selected |
+| Folds | **stratified station blocks** (`experiments/open_cube/blocks.py`): k-means on the 13 western stations into 4 blocks, one of ITCSM_01/04/07/09 added to each. Not `eocube.pipeline.spatial_block_split`, which splits a pixel grid |
+| Partitions | **5 block partitions** (seeds 0–4). The seed changes which stations fall in which fold; it also sets the forest's random state |
+| Model | random forest, 300 trees (`eocube.baselines.make_random_forest`), same for every arm. 8 features: S1 VV, VH (linear), S2 B02–B12 (DN) |
+| Primary result | **paired ΔR² per fold**: the arm's model minus the baseline's, on the test samples both accept |
+| Metrics | **absolute R²**, and **anomaly R²**: target and prediction each minus their own station-month mean over the scored samples |
+| Cost | 2 min 12 s on 4 CPUs, ≈ 0.15 CPU-h |
 
-The gates already ran on every sample's layers when the cube was built (job 247673).
-An arm is a filter on those recorded verdicts, so no gate is re-run and no layer
-is re-read. That is equivalent to `eocube.ablation.run_ablation` with `skip`, applied
-per sample, and keeps its conventions: **delta = arm − baseline, negative means the
-gate was doing useful work**, and refusals are reported with the metrics.
+**How an arm is built.** The gates already ran on every sample's layers (job 247673),
+so an arm is a filter on those recorded verdicts. Nothing is re-read. This is
+`eocube.ablation.run_ablation`'s `skip`, applied per sample, with its conventions:
+**ΔR² = arm − baseline. Negative means the gate was doing useful work; positive means
+the model did better without it.**
 
-## Results
+**Why the anomaly prediction is demeaned too.** The power proxy predicted anomalies
+directly. This model predicts soil moisture, so its anomaly is its own prediction
+minus its own station-month mean. Subtracting the *target's* climatology from the
+prediction would leave the residual unchanged and only shrink the denominator. A first
+run (job 247692) did that and reported anomaly R² ≈ −22. Absolute R², ΔR² and the
+refusals were identical between the two runs.
 
-20 folds per arm (5 seeds × 4 folds). Mean ± sd across folds.
+## Summary table
 
-| Arm | Samples kept | Refused | R² (own test set) | **Paired ΔR², absolute** | Paired ΔR², anomaly | Reading |
-|---|---|---|---|---|---|---|
-| **All gates active (baseline)** | 3,395 | 110 (3.1%) | −0.404 ± 1.479 | — | — | baseline |
-| without geometry_crs | 3,395 | 110 (3.1%) | −0.404 ± 1.479 | 0.000 | 0.000 | identical to baseline: the gate refused nothing |
-| without resolution | 3,395 | 110 (3.1%) | −0.404 ± 1.479 | 0.000 | 0.000 | identical to baseline: the gate refused nothing |
-| without temporal_alignment | 3,395 | 110 (3.1%) | −0.404 ± 1.479 | 0.000 | 0.000 | identical to baseline: the gate refused nothing |
-| **without quality_missingness** | **3,505** | **0** | −0.359 ± 1.370 | **+0.033 ± 0.052** (−0.022 to +0.212) | +0.193 ± 0.223 | **below detection limit on this task** |
-| without sensor_physics | 3,395 | 110 (3.1%) | −0.404 ± 1.479 | 0.000 | 0.000 | identical to baseline: the gate refused nothing |
-| *geometry in grid mode (not selected)* | 2,475 | 1,030 (29.4%) | −0.378 ± 1.459 | +0.037 ± 0.069 (−0.058 to +0.223) | +0.339 ± 0.608 | below detection limit on this task |
+20 folds per arm (5 partitions × 4 folds). R² on each arm's own accepted test samples,
+mean ± sd across folds. ΔR² paired, mean ± sd. **Decisions**: gate verdicts of
+PASS_WITH_DECISION on the kept samples, one per gate per sample (a removed gate records
+none).
 
-**The four identical arms are reported as below detection limit on this task,** with a
-stronger qualifier: they were not tested. Their gates refused no sample in this cube,
-so the arm equals the baseline by construction. That says nothing about what the gate
-would do on a cube where it does refuse.
+| Arm | Kept | Refusal rate | Decisions (per sample) | R² absolute | **ΔR² absolute** | R² anomaly | **ΔR² anomaly** | Reading |
+|---|---|---|---|---|---|---|---|---|
+| **All gates active** | 3,395 | 3.1% | 8,566 (2.52) | −0.404 ± 1.479 | — | −3.196 ± 3.350 | — | baseline |
+| without geometry_crs | 3,395 | 3.1% | 5,171 (1.52) | −0.404 ± 1.479 | 0.000 | −3.196 ± 3.350 | 0.000 | below detection limit on this task: refused nothing |
+| without resolution | 3,395 | 3.1% | 5,171 (1.52) | −0.404 ± 1.479 | 0.000 | −3.196 ± 3.350 | 0.000 | below detection limit on this task: refused nothing |
+| without temporal_alignment | 3,395 | 3.1% | 7,182 (2.12) | −0.404 ± 1.479 | 0.000 | −3.196 ± 3.350 | 0.000 | below detection limit on this task: refused nothing |
+| **without quality_missingness** | 3,505 | 0.0% | 8,425 (2.40) | −0.359 ± 1.370 | **+0.033 ± 0.052** | −3.014 ± 3.109 | **+0.193 ± 0.223** | absolute: below detection limit on this task. Anomaly: above it, against the gate |
+| without sensor_physics | 3,395 | 3.1% | 8,566 (2.52) | −0.404 ± 1.479 | 0.000 | −3.196 ± 3.350 | 0.000 | below detection limit on this task: refused nothing |
+| *geometry in grid mode* | 2,475 | 29.4% | 3,743 (1.51) | −0.378 ± 1.459 | +0.037 ± 0.069 | −2.887 ± 2.983 | +0.339 ± 0.608 | absolute: below detection limit on this task. Anomaly: above it, against grid mode |
 
-**The anomaly column is not read as an effect** (next section). Its means exceed 0.05,
-but both models score far below the trivial anomaly predictor, which is zero
-everywhere and scores 0. A difference between two models at R² ≈ −3 measures how
-badly they fail, not what a gate is worth.
+**What the decisions are**, on the baseline's 3,395 samples:
+- point-mode geometry: 3,395 (every sample: CRS differ, point agreement recorded);
+- resolution: 3,395 (coarsest-GSD default; describes a grid cube; PLAN.md, open
+  question 5);
+- temporal alignment: 1,384 (S2 outside the 7-day window, kept and flagged);
+- quality: 392 (range excursions within tolerance, zero-fill and retained-invalid
+  notes);
+- sensor physics: none.
 
-### The quality gate, fold by fold
+Removing a gate removes its decisions; only the quality gate also changes the samples.
 
-Paired ΔR² (absolute) for "without quality_missingness":
+## Per-fold deltas
 
-| Seed | Fold 0 | Fold 1 | Fold 2 | Fold 3 | Seed mean |
-|---|---|---|---|---|---|
-| 0 | +0.030 | +0.028 | +0.029 | +0.068 | +0.039 |
-| 1 | +0.005 | +0.037 | −0.022 | +0.092 | +0.028 |
-| 2 | −0.005 | +0.047 | +0.011 | +0.058 | +0.027 |
-| 3 | +0.012 | −0.008 | +0.019 | +0.060 | +0.021 |
-| 4 | −0.011 | +0.005 | −0.005 | **+0.212** | +0.050 |
+Paired ΔR² per fold, absolute / anomaly.
 
-- **Positive in 15 of 20 folds.** Excluding the 2-station fold (+0.212; see "Caveats"),
-  the mean is **+0.024**, 14 of 19 positive.
-- **Four of the five seed means are below 0.05.** Seed 4's is 0.0503, carried by the
-  2-station fold; without it, seed 4's mean is −0.004.
-- The paired set is the baseline's own test samples, so the comparison is on identical
-  targets. The only difference is 110 more training samples (3.2% more), and the model
-  that trains on them is slightly, consistently better.
+**Without quality_missingness**
 
-**Descriptive, resting on 4 stations, no significance claimed** (the secondary
-analysis in PLAN.md): per-station paired ΔR² averages **+0.188 at the four eastern
-stations** and **−0.065 at the other 13**. With a model this weak, this is reported,
-not interpreted.
+| Partition | Fold 0 | Fold 1 | Fold 2 | Fold 3 |
+|---|---|---|---|---|
+| 0 | +0.030 / +0.252 | +0.028 / −0.042 | +0.029 / +0.768 | +0.068 / +0.085 |
+| 1 | +0.005 / +0.122 | +0.037 / +0.159 | −0.022 / −0.055 | +0.092 / +0.168 |
+| 2 | −0.005 / +0.078 | +0.047 / +0.264 | +0.011 / +0.154 | +0.058 / +0.112 |
+| 3 | +0.012 / +0.204 | −0.008 / −0.022 | +0.019 / +0.632 | +0.060 / +0.158 |
+| 4 | −0.011 / +0.120 | +0.005 / −0.051 | −0.005 / +0.187 | **+0.212 / +0.572** |
 
-### Where the refusals fall
+- **Absolute:** median +0.024, positive in 15 of 20 folds. Without the 2-station fold
+  (partition 4, fold 3) the mean is +0.024.
+- **Anomaly:** median +0.156, positive in 16 of 20.
+- **In partitions 0–3, fold 3 holds ITCSM_01–03.** These are the only folds where the
+  baseline beats zero absolute R², and the absolute gain there is consistent (+0.058
+  to +0.092).
 
-| Arm | Refused samples by station |
-|---|---|
-| Quality gate (all gates active) | ITCSM_08 32, 03 14, 07 14, 17 11, 04 8, 11 7, 05 6, 15 6, 02 4, 13 4, 16 4; six stations none |
-| Grid-mode geometry (with quality) | every station, 42–85 each; 1,030 in total (979 grid + 110 quality − 59 both) |
+**Geometry in grid mode (supplementary)**
 
-The 110 come from 24 S2 observations, mostly winter dates. In all 110 the station
-pixel passed the per-pixel rules (docs/cube_2019.md, job 247675). Each refusal is a
-correct statement about other pixels in the 1 km chip. That is the evidence for the
-open pixel-versus-chip decision (PLAN.md).
+| Partition | Fold 0 | Fold 1 | Fold 2 | Fold 3 |
+|---|---|---|---|---|
+| 0 | +0.132 / +0.933 | +0.055 / +0.019 | −0.027 / +0.704 | −0.041 / −0.206 |
+| 1 | −0.019 / −0.001 | +0.039 / +0.268 | +0.099 / +0.259 | −0.010 / −0.211 |
+| 2 | +0.019 / +0.055 | +0.048 / +0.399 | +0.098 / +0.322 | −0.034 / −0.180 |
+| 3 | +0.065 / +0.373 | +0.052 / +0.108 | +0.041 / +0.338 | −0.027 / −0.078 |
+| 4 | +0.086 / +0.851 | −0.011 / −0.105 | −0.058 / +0.442 | +0.223 / +2.500 |
 
-## Baseline comparison
+- **Absolute:** median +0.040, positive in 12 of 20.
+- **Anomaly:** median +0.264, positive in 14 of 20.
+- **The paired set here is the grid arm's 2,475 samples.** The grid model trains on
+  fewer samples and still scores better on them in anomaly terms.
+- **A possible reason, not verified:** grid mode refuses samples by S1 frame CRS, which
+  follows the relative orbit. It therefore drops whole orbits, and with them orbit
+  (incidence-angle) variation in backscatter.
 
-Baseline arm, per fold. R² against the in-situ 5 cm soil moisture.
+The four identical arms are 0.000 in every fold.
 
-| | Median | Range | Folds positive |
+## East/west breakdown (secondary)
+
+**Descriptive only. It rests on 4 eastern stations; no significance is claimed.**
+Per-station paired ΔR² within each test fold, averaged over folds and partitions:
+
+| Arm | Absolute: 4 eastern | Absolute: other 13 | Anomaly: 4 eastern | Anomaly: other 13 |
+|---|---|---|---|---|
+| without quality_missingness | +0.188 | −0.065 | +0.278 | +0.849 |
+| geometry in grid mode | +0.001 | +0.258 | −0.173 | +1.551 |
+
+Per-station R² is computed on one station's samples, where variance is small and
+values swing widely. The breakdown was planned to separate a temporal-gate effect by
+S2 age. **The temporal gate refused nothing, so it has nothing to separate here.**
+
+## Baseline skill
+
+Baseline arm, per fold:
+
+| | Median | Range | Folds above 0 |
 |---|---|---|---|
-| Random forest, absolute R² | **−0.07** | −6.63 to +0.28 | 4 of 20, all the fold with ITCSM_01–03 |
+| Random forest, absolute R² | **−0.073** | −6.63 to +0.28 | 4 of 20, all the fold with ITCSM_01–03 |
 | Training-mean predictor, absolute R² | −0.02 | −5.00 to 0.00 | 0 of 20 |
-| Random forest beats the training mean | | | **7 of 20 folds** |
-| Random forest, anomaly R² | **−1.9** | −15.0 to −1.0 | 0 of 20 |
+| Random forest, anomaly R² | **−1.90** | −15.0 to −1.0 | 0 of 20 |
+
+The forest beats the training mean in 7 of 20 folds.
 
 - **Absolute.** Eight station-pixel values from one S1 pass and one S2 scene do not
-  carry a held-out station's soil moisture level. Between-station soil differences
-  are 37% of the variance (PLAN.md, "Power check"), and nothing in these features
-  encodes soil type.
-- **Anomaly.** Within a station and month, the predictions move by about as much as the
-  target does, and not with it. An anomaly R² of −1 is what uncorrelated predictions of
-  equal variance score. The S1 backscatter at a field pixel is dominated by orbit
-  geometry, vegetation and speckle; the Step 3 sample already showed a factor-of-3
-  variation in VV over a dry week (PLAN.md).
-- **What this does to the detection limit.** The ≈ 0.05 limit came from a proxy that
-  predicted held-out stations from their neighbours' in-situ readings. It assumed a
-  model with skill, and PLAN.md warned that real effects would be smaller. With no
-  skill, fold noise is larger: the quality arm's ΔR² has sd 0.052, at the top of the
-  proxy's ±0.03–0.05. So 0.05 is, if anything, optimistic for this task.
+  carry a held-out station's moisture level. Between-station differences are 37% of
+  the variance, and nothing in the features encodes soil.
+- **Anomaly.** An anomaly R² of −1 is what uncorrelated predictions of equal variance
+  score. Within a station and month, S1 backscatter moves with orbit geometry,
+  vegetation and speckle as much as with moisture.
+- **What this means for the limit.** The power analysis found ΔR² 0.062 (absolute)
+  and 0.235 (anomaly) for its staleness test, with a predictor that had skill. Here the
+  baseline has none, and fold noise in the paired delta is 0.052 (absolute) and 0.223
+  (anomaly), at or above the proxy's. **The ≈ 0.05 limit stands, and is optimistic
+  for this task.**
+- **Why a random forest.** It is the repository's reference baseline, invariant to
+  linear-vs-dB scaling, and needs no tuning. A different learner on the same eight
+  features would not supply the missing between-station information. The weakness is
+  in the features, not the learner.
 
 ## Caveats
 
-1. **The temporal gate retains and flags; it does not refuse.** 1,415 samples (40.4%)
-   have S2 more than 7 days old. They are in every arm, flagged PASS_WITH_DECISION.
-   Removing the gate therefore changes nothing. **Whether an out-of-window sample
-   should be excluded is a method decision, not taken here.** Until it is, this
-   ablation cannot measure the temporal gate, the main gate the cube was built to test.
-2. **5 seeds, 4 distinct partitions.** Seeds 1 and 2 produce the same stratified blocks,
-   so they differ only in the forest's random state. The seeds were fixed as 0–4 in
+1. **5 partitions, 4 distinct.** Seeds 1 and 2 give the same stratified blocks, so
+   those two differ only in the forest's random state. The power analysis used the same
+   seeds 0–4 (`eastwest_blocks.py`) and has the same duplicate. The seeds were fixed in
    advance and are not re-picked after seeing results.
-3. **One 2-station fold.** Seed 4's partition puts ITCSM_01 and ITCSM_08 alone in fold
-   3 (k-means left ITCSM_08 as a 1-station western block). PLAN.md's "3–7 per fold" was
+2. **One 2-station fold.** Partition 4 puts ITCSM_01 and ITCSM_08 alone in fold 3:
+   k-means leaves ITCSM_08 as a one-station western block. PLAN.md's "3–7 per fold" was
    checked on two partitions only. That fold has baseline R² −6.63 (null −5.00) and
-   dominates the arm means and sds; medians are given above for that reason.
-4. **The paired comparison holds the test targets fixed, not the training set.** The
-   arm and baseline models train on different sample counts by design. That is the
-   gate's effect on training, which is what is measured here.
-5. **One model, one year.** No hyperparameter was tuned, and none should be tuned to
-   make a gate effect appear.
-
-## Corrections during the run
-
-- **Anomaly R², first run (job 247692): wrong by construction.** It subtracted one
-  station-month climatology from both target and prediction. That leaves the residual
-  unchanged and shrinks only the denominator, so it reported anomaly R² ≈ −22. The
-  reported run (247693) demeans target and prediction separately within each
-  station-month, which scores tracking. **Absolute R², ΔR² and refusals were identical
-  in both runs.**
-
-## What would make the ablation informative
-
-These are not done; each is a decision, not a fix.
-
-1. **A model with skill on held-out stations.** For example, features with a
-   between-station reference (per-station backscatter normalisation, change detection
-   against a dry reference, a soil map). That is a modelling choice, made once, before
-   any gate result is looked at.
-2. **The temporal decision:** keep out-of-window samples flagged, or exclude them. Only
-   the second gives the temporal gate an arm.
-3. **Pixel-versus-chip quality** (PLAN.md). On this cube, the chip-level gate refuses
-   only samples whose station pixel is valid, so its measured effect is the cost of
-   that rigidity.
-4. **More years.** 2017, 2018 and 2020 would multiply samples, but not independent
-   places: 17 stations remain the limit.
+   inflates the means and sds, so medians are given.
+3. **The paired set fixes the test targets, not the training set.** The arm and
+   baseline models train on different sample counts by design; that is the effect of a
+   gate on training.
+4. **One model, one year, nothing tuned.** No hyperparameter should be tuned to make a
+   gate effect appear.
 
 ## Reproduce
 
 ```bash
-cd ~/work/logs && sbatch -A <account> ~/eocube/scripts/ablation.sbatch 2019 5
+cd ~/work/logs && sbatch -A mif76448_mif ~/eocube/scripts/ablation.sbatch 2019 5
 ```
 
 `experiments/open_cube/run_ablation.py` reads the cube's `samples.csv` and `gates.json`
-(build_cube.py output), no imagery. Block partitions come from
-`experiments/open_cube/blocks.py`, shared with the power check and the east/west
-analysis.
+(build_cube.py output), no imagery. The block partitions come from
+`experiments/open_cube/blocks.py`, which the power check and the east/west analysis
+also use.

@@ -367,7 +367,8 @@ refuses dark winter vegetation, the ceiling refuses bright cloud (docs/cube_2019
   replaced by the declared physics, not by a looser number.
 - **The floor also selects samples.** B02 ≥ 50 is used in fetch-time tile scoring and in
   the per-pixel usability rule, as well as in the gate. Changing it would change which
-  S2 dates are usable, and so the sample set the ablation compares on.
+  S2 dates are usable, and so the sample set. The ablation would then no longer run on
+  the cube documented in docs/cube_2019.md.
 
 ### Next open decision: station pixel or chip for quality
 

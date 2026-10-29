@@ -90,18 +90,29 @@ def load(cube: Path):
                          for r in rows])
     refused = {g: np.array([p[k] == "refuse" for p in per]) for g, k in GATES.items()}
     refused_grid = np.array([p["geometry_crs"] == "refuse" for p in per])
-    return X, y, sm_group, stn, refused, refused_grid
+    decided = {g: np.array([p[k] == "pass_with_decision" for p in per]) for g, k in GATES.items()}
+    decided_grid = np.array([p["geometry_crs"] == "pass_with_decision" for p in per])
+    return X, y, sm_group, stn, (refused, refused_grid), (decided, decided_grid)
 
 
-def arms(refused, refused_grid) -> dict[str, tuple[str | None, np.ndarray]]:
-    """{arm: (gate removed, kept mask)}."""
-    def keep(skip=(), override=None):
-        r = dict(refused, **(override or {}))
-        return ~np.any([v for g, v in r.items() if g not in skip], axis=0)
-    out = {BASELINE: (None, keep())}
+def arms(verdicts, decisions) -> dict[str, tuple[str | None, np.ndarray, int]]:
+    """{arm: (gate removed, kept mask, decisions recorded on the kept samples)}.
+
+    Decisions are counted as gate verdicts of PASS_WITH_DECISION, one per gate per
+    sample; a removed gate records none.
+    """
+    (refused, refused_grid), (decided, decided_grid) = verdicts, decisions
+
+    def arm(skip=(), grid=False):
+        r = dict(refused, **({"geometry_crs": refused_grid} if grid else {}))
+        d = dict(decided, **({"geometry_crs": decided_grid} if grid else {}))
+        kept = ~np.any([v for g, v in r.items() if g not in skip], axis=0)
+        n_dec = int(sum((v & kept).sum() for g, v in d.items() if g not in skip))
+        return (skip[0] if skip else None), kept, n_dec
+    out = {BASELINE: arm()}
     for g in GATES:
-        out[f"without {g}"] = (g, keep(skip=(g,)))
-    out[GRID] = (None, keep(override={"geometry_crs": refused_grid}))
+        out[f"without {g}"] = arm(skip=(g,))
+    out[GRID] = arm(grid=True)
     return out
 
 
@@ -114,8 +125,8 @@ def main():
     a = ap.parse_args()
     out = a.out.expanduser()
     out.mkdir(parents=True, exist_ok=True)
-    X, y, grp, stn, refused, refused_grid = load(a.cube.expanduser())
-    A = arms(refused, refused_grid)
+    X, y, grp, stn, verdicts, decisions = load(a.cube.expanduser())
+    A = arms(verdicts, decisions)
     names = sorted(set(stn))
     west = [n for n in names if n not in EAST]
     fit_predict = make_random_forest(n_estimators=300, n_jobs=int(os.environ.get("SLURM_CPUS_PER_TASK", 1)))
@@ -129,13 +140,13 @@ def main():
         for k, test_stations in enumerate(blocks):
             test = np.isin(stn, test_stations)
             pred = {}
-            for arm, (_, kept) in A.items():
+            for arm, (_, kept, _) in A.items():
                 tr = kept & ~test
                 pred[arm] = np.full(len(y), np.nan)
                 pred[arm][test] = fit_predict(X[tr], y[tr], X[test], seed)
             null = np.full(len(y), y[A[BASELINE][1] & ~test].mean())
             base_keep = A[BASELINE][1]
-            for arm, (_, kept) in A.items():
+            for arm, (_, kept, _) in A.items():
                 own, pair = kept & test, kept & base_keep & test
                 rec = {"arm": arm, "seed": seed, "fold": k, "test_stations": test_stations,
                        "n_train": int((kept & ~test).sum()), "n_test_own": int(own.sum()),
@@ -147,31 +158,39 @@ def main():
                        "r2_paired_baseline": r2(y[pair], pred[BASELINE][pair]),
                        "r2_anom_paired_baseline": anom_r2(y[pair], pred[BASELINE][pair], grp[pair]),
                        "r2_null": r2(y[pair], null[pair]),
-                       "per_station": {}}
+                       "per_station": {}, "per_station_anom": {}}
                 rec["d_r2"] = rec["r2_paired"] - rec["r2_paired_baseline"]
                 rec["d_r2_anom"] = rec["r2_anom_paired"] - rec["r2_anom_paired_baseline"]
                 for s in test_stations:
                     m = pair & (stn == s)
                     if m.sum() > 2:
                         rec["per_station"][s] = r2(y[m], pred[arm][m]) - r2(y[m], pred[BASELINE][m])
+                        rec["per_station_anom"][s] = (anom_r2(y[m], pred[arm][m], grp[m])
+                                                      - anom_r2(y[m], pred[BASELINE][m], grp[m]))
                 runs.append(rec)
         print(f"seed {seed} done ({time.perf_counter() - t0:.0f} s)")
 
     summary = []
-    for arm, (gate, kept) in A.items():
+    for arm, (gate, kept, n_dec) in A.items():
         rs = [r for r in runs if r["arm"] == arm]
         d, da = [r["d_r2"] for r in rs], [r["d_r2_anom"] for r in rs]
         seed_d = [st.mean(r["d_r2"] for r in rs if r["seed"] == s) for s in range(a.seeds)]
         east = [v for r in rs for s, v in r["per_station"].items() if s in EAST]
         rest = [v for r in rs for s, v in r["per_station"].items() if s not in EAST]
+        east_a = [v for r in rs for s, v in r["per_station_anom"].items() if s in EAST]
+        rest_a = [v for r in rs for s, v in r["per_station_anom"].items() if s not in EAST]
         n_ref = int((~kept).sum())
         summary.append({
             "arm": arm, "gate_removed": gate, "samples_kept": int(kept.sum()),
             "samples_refused": n_ref, "refusal_rate": n_ref / len(y),
             "refused_by_station": dict(collections.Counter(stn[~kept].tolist())),
             "identical_to_baseline": bool(np.array_equal(kept, A[BASELINE][1])),
+            "decisions": n_dec, "decisions_per_sample": n_dec / int(kept.sum()),
             "r2_own_mean": st.mean(r["r2_own"] for r in rs), "r2_own_sd": st.stdev(r["r2_own"] for r in rs),
+            "r2_own_median": st.median(r["r2_own"] for r in rs),
             "r2_anom_own_mean": st.mean(r["r2_anom_own"] for r in rs),
+            "r2_anom_own_sd": st.stdev(r["r2_anom_own"] for r in rs),
+            "r2_anom_own_median": st.median(r["r2_anom_own"] for r in rs),
             "d_r2_mean": st.mean(d), "d_r2_sd": st.stdev(d), "d_r2_min": min(d), "d_r2_max": max(d),
             "d_r2_seed_means": seed_d,
             "d_r2_anom_mean": st.mean(da), "d_r2_anom_sd": st.stdev(da),
@@ -179,6 +198,8 @@ def main():
             "r2_null_mean": st.mean(r["r2_null"] for r in rs),
             "d_r2_station_east_mean": st.mean(east) if east else None,
             "d_r2_station_rest_mean": st.mean(rest) if rest else None,
+            "d_r2_anom_station_east_mean": st.mean(east_a) if east_a else None,
+            "d_r2_anom_station_rest_mean": st.mean(rest_a) if rest_a else None,
             "below_detection_limit": abs(st.mean(d)) < DETECTION_LIMIT and abs(st.mean(da)) < DETECTION_LIMIT})
     result = {"cube": str(a.cube), "seeds": a.seeds, "features": FEATURES,
               "model": "RandomForestRegressor(n_estimators=300)", "geometry_mode": "point",
@@ -186,17 +207,17 @@ def main():
               "summary": summary, "runs": runs}
     (out / "ablation.json").write_text(json.dumps(result, indent=1), encoding="utf-8")
 
-    print(f"\n{'arm':40s} {'kept':>5} {'refused':>8} {'R2 own':>13} {'dR2 paired':>17} "
-          f"{'dR2 anomaly':>17}  verdict")
+    print(f"\n{'arm':40s} {'kept':>5} {'refused':>8} {'decisions':>9} {'R2 abs':>14} "
+          f"{'dR2 abs':>15} {'R2 anomaly':>14} {'dR2 anomaly':>15}  reading")
     for s in summary:
         verdict = ("baseline" if s["arm"] == BASELINE else
                    "identical to baseline" if s["identical_to_baseline"] else
                    "below detection limit on this task" if s["below_detection_limit"] else
                    "mean |dR2| >= 0.05; read against the baseline's skill")
-        print(f"{s['arm']:40s} {s['samples_kept']:5d} {s['refusal_rate']:7.1%} "
-              f"{s['r2_own_mean']:6.3f}±{s['r2_own_sd']:.3f} "
-              f"{s['d_r2_mean']:+7.3f}±{s['d_r2_sd']:.3f} {s['d_r2_anom_mean']:+7.3f}±{s['d_r2_anom_sd']:.3f}"
-              f"  {verdict}")
+        print(f"{s['arm']:40s} {s['samples_kept']:5d} {s['refusal_rate']:7.1%} {s['decisions']:9d} "
+              f"{s['r2_own_mean']:6.3f}±{s['r2_own_sd']:.3f} {s['d_r2_mean']:+.3f}±{s['d_r2_sd']:.3f} "
+              f"{s['r2_anom_own_mean']:6.3f}±{s['r2_anom_own_sd']:.3f} "
+              f"{s['d_r2_anom_mean']:+.3f}±{s['d_r2_anom_sd']:.3f}  {verdict}")
     b = summary[0]
     print(f"\nbaseline anomaly R2 (own) {b['r2_anom_own_mean']:.3f}; null (training mean) R2 "
           f"{b['r2_null_mean']:.3f}; {len(runs) // len(A)} folds x seeds per arm")

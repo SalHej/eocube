@@ -312,6 +312,9 @@ the cube's 3,505 samples (docs/cube_2019.md):
 The power proxy above still ignores clouds and uses in-situ neighbours, not satellite
 features. It is not recomputed here; its role was to set the detection limit, and that
 is re-examined when the ablation runs.
+*Re-examined 2026-10-29 (docs/open_ablation.md, job 247693): the real model has no skill
+on held-out stations, and fold noise in paired ΔR² is 0.052. So ≈ 0.05 stands, as an
+optimistic limit for this task.*
 
 **Secondary analysis (planned):** paired ΔR² per station, reported for the four
 eastern stations against the other 13. This is a **descriptive** breakdown, labelled

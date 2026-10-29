@@ -191,7 +191,8 @@ def main():
     for s in summary:
         verdict = ("baseline" if s["arm"] == BASELINE else
                    "identical to baseline" if s["identical_to_baseline"] else
-                   "below detection limit on this task" if s["below_detection_limit"] else "detectable")
+                   "below detection limit on this task" if s["below_detection_limit"] else
+                   "mean |dR2| >= 0.05; read against the baseline's skill")
         print(f"{s['arm']:40s} {s['samples_kept']:5d} {s['refusal_rate']:7.1%} "
               f"{s['r2_own_mean']:6.3f}±{s['r2_own_sd']:.3f} "
               f"{s['d_r2_mean']:+7.3f}±{s['d_r2_sd']:.3f} {s['d_r2_anom_mean']:+7.3f}±{s['d_r2_anom_sd']:.3f}"

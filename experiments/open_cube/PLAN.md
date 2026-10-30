@@ -370,7 +370,11 @@ refuses dark winter vegetation, the ceiling refuses bright cloud (docs/cube_2019
   S2 dates are usable, and so the sample set. The ablation would then no longer run on
   the cube documented in docs/cube_2019.md.
 
-### Next open decision: station pixel or chip for quality
+### Station pixel or chip for quality
+
+*Resolved 2026-10-30: the station pixel, in point mode (commit 00b166c). Before and
+after, with the bypass evidence, in docs/open_ablation.md. The record of the question
+as it was posed follows.*
 
 **Open, not implemented: should the quality gate judge the 1 km chip, the station
 pixel, or both?** This is the next decision for this cube.
@@ -481,7 +485,7 @@ autumn and winter windows (e.g. 2019-11 and 2020-02) before Step 4 draws conclus
    arguably too long; this will be judged with data in Step 4.
 3. **dB:** the sensor-physics gate refuses additive arithmetic on dB. Whether any
    feature uses dB is a modelling choice, and will be declared, not hidden.
-4. **Quality at the station pixel or the chip** (next decision; see "Decisions for the
-   2019 ablation"). Evidence: the 110 chip-level refusals, all with a valid station
-   pixel.
+4. ~~Quality at the station pixel or the chip~~ Resolved 2026-10-30: the station pixel,
+   in point mode; chip-level findings are recorded as decisions
+   (docs/open_ablation.md).
 5. **The resolution gate's stack assumption** in a point cube (flagged, same section).

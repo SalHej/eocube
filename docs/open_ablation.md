@@ -1,8 +1,9 @@
 # The 2019 open-cube ablation: leave one gate out
 
 Twente soil moisture, 2019: 3,505 samples at 17 stations, the cube documented in
-docs/cube_2019.md (job 247673). Ablation job **247696**. Results:
-`~/work/results/open_cube/ablation_2019/ablation.json` on the cluster.
+docs/cube_2019.md. Ablation jobs **247696** (before: chip-level quality) and **247798**
+(after: station-pixel quality). Results under `~/work/results/open_cube/` on the
+cluster.
 
 > **Detection limit: ΔR² ≈ 0.05** (PLAN.md, "Power check"). Any gate whose effect falls
 > below it is reported as **"below detection limit on this task"**, never as "no effect".
@@ -12,34 +13,118 @@ docs/cube_2019.md (job 247673). Ablation job **247696**. Results:
 > target: a misregistered layer, a leaked future scene or a cloud-filled pixel are
 > wrong whether or not a model's score notices.
 
-## Result
+## Conclusion
 
-**No gate had a detectable effect on absolute R².** The quality gate is the only one
-whose removal changed anything. **Removing it changed paired ΔR² by +0.033 ± 0.052:
-below detection limit on this task.**
+1. **No gate had a detectable effect on absolute R² on this task.** Before the change
+   below, the quality gate's removal moved paired ΔR² by +0.033 ± 0.052; the other
+   four gates refused nothing. Each is below detection limit on this task.
+2. **The model has no skill, and the cause is the features, not the split.** With every
+   station in training, the random forest scores R² 0.18 against 0.55 for predicting
+   each station's own mean. The radar signal at the pixel is real but weak (r ≈ 0.30).
+3. **The temporal check had moved upstream, into assembly, and the gate fires when
+   that is removed.** Allowing an S2 scene after the pass gave 1,875 leaked samples;
+   the temporal gate refused all 1,875.
+4. **The framework judged layers, not the sample pixel, and 1,123 samples passed
+   through it with invalid station pixels.** These were stations read through cloud,
+   shadow, water or fill. Every gate passed them, because every gate looked at the
+   1 km chip and none at the one pixel the sample is. Meanwhile the quality gate
+   refused 110 samples for pixels the sample never used.
 
-**On anomaly R², removing the quality gate exceeded the limit: +0.193 ± 0.223.** That
-is in the direction of the gate costing accuracy: 16 of 20 folds improved when its 110
-refused samples were trained on. It is the over-rigid chip-level gate refusing samples
-whose station pixel was valid (docs/cube_2019.md), now measured as a cost. One
-qualification belongs with it, not instead of it: **both models score far below
-predicting no anomaly at all.** The gain is a reduction in the error of a model that
-does not track moisture (see "Baseline skill").
+**The fourth is the contribution.** A validity framework for point-sampled cubes that
+does not check the point being measured has a design flaw. That flaw stayed invisible
+while assembly's per-pixel rules happened to cover it. It was found by running the
+framework and removing the upstream protections one at a time, not by inspection.
 
-**Geometry, resolution, temporal alignment and sensor physics refused no sample in this
-cube.** Their arms are the baseline, sample for sample, so each is below detection
-limit on this task in the plainest sense: **there was nothing to detect.** That holds
-for the temporal gate too: it keeps and flags the 1,415 samples with S2 older than
-7 days rather than refusing them.
+**The fix is now in the method.** In point mode, the quality gate judges the sample
+pixel: it refuses nodata, implausible values or an invalid QA class there, and records
+chip-level anomalies as decisions. Measured on the same cube:
+- **its 110 refusals are gone;**
+- **so is its negative effect on accuracy:** anomaly ΔR² was +0.193 when it was
+  removed; now it is 0.000;
+- **of the 1,123 invalid-pixel samples, all but 26 are now refused** ("Station-pixel
+  validity: before and after").
+
+The three gates that never fired were then given their failures on purpose. Each fired
+on 20 of 20 samples. Each also stayed silent in the cases where it is blind by design,
+which are stated, not hidden ("Validation: the silent gates under induced failures").
+**Their silence on the real cube means the failures were absent, not unseen**, within
+the bounds that section names.
+
+## Station-pixel validity: before and after
+
+**What changed** (commit 00b166c):
+- `eocube.io.describe` now records, at the declared sample point:
+  - the value in each band;
+  - whether it is nodata;
+  - whether it is outside the declared plausible range;
+  - the QA class there, read from a declared `qa_mask_path` on its own grid and checked
+    against `qa_valid_classes`.
+- `check_quality_missingness(mode="point")` refuses if, in any layer, the sample pixel
+  is outside the layer, nodata, implausible, or of an invalid QA class. Chip-level
+  failures become PASS_WITH_DECISION. A QA mask whose class at the pixel was not read
+  is reported as unchecked, not valid.
+- Nine new tests, covering both paths:
+  - a chip fill row away from the station: refused in grid mode, recorded in point mode;
+  - cloud at the station in a clean chip: passed in grid mode, refused in point mode;
+  - single-pixel fill at the station, within the chip tolerance: refused in point mode;
+  - nodata at the station; a clean pixel; no `sample_pixel`; an unread QA class; an
+    invalid mode.
+
+For this cube the S2 layers declare their own SCL chip as the QA mask, with valid
+classes 4 and 5: the rule assembly already applied. The bounds are unchanged
+(B02 ≥ 50, other bands ≤ 12,000, S1 ≥ 1e-5).
+
+**On the documented cube** (job 247797; samples identical):
+
+| Quality gate | Refused | Pass with decision | Pass |
+|---|---|---|---|
+| Chip level (before) | 110 | 392 | 3,003 |
+| **Station pixel (after)** | **0** | 502 | 3,003 |
+
+The 110 became decisions, as their causes were all away from the station pixel.
+
+**Ablation, before and after** (paired ΔR², mean ± sd over 20 folds):
+
+| | Samples kept by all gates | Removing the quality gate: ΔR² absolute | Removing the quality gate: ΔR² anomaly |
+|---|---|---|---|
+| Before: chip-level quality (job 247696) | 3,395 | +0.033 ± 0.052 | **+0.193 ± 0.223** (16 of 20 folds improved) |
+| **After: station-pixel quality** (job 247798) | **3,505** | **0.000** | **0.000** |
+
+**The quality gate's negative effect did not just shrink; it went to zero.** The
+station-pixel gate refuses nothing on this cube, so removing it changes nothing. The
+chip-level strictness was the entire cause. Job 247798 also reruns the old gate as a
+supplementary arm: against the new baseline it scores −0.033 ± 0.052 (absolute) and
+−0.193 ± 0.223 (anomaly), the before figures with the sign reversed, as they should be.
+
+**What the new gate catches, on the bypassed cubes** (job 247799):
+
+| Rule | Changed samples | Refused by any gate, chip-level quality | **Refused by any gate, station-pixel quality** |
+|---|---|---|---|
+| first tile / first frame | 215 | 65 (chip rigidity; station pixels valid) | **0** |
+| S2 after the pass allowed | 1,875 | 1,875 (temporal) | 1,875 (temporal) |
+| all three bypassed | 1,979 | 1,909 | 1,874 |
+| all three + per-pixel rules off | 3,234 | 2,111, so **1,123 pass** | **3,208, so 26 pass** |
+
+- With assembly's per-pixel rules removed, the station-pixel gate alone refuses 2,614
+  of the changed samples. **It now does the job those rules did.**
+- On the tile-choice changes, it refuses none of the 215; the chip-level gate refused
+  65. Those stations' pixels were valid.
+- **The 26 that still pass were not examined individually.** The likeliest source is
+  tile-choice changes with valid station pixels, which the first-tile arm shows pass
+  (0 of 215 refused). This is not verified.
+
+**The ablation has not been re-run on a cube without assembly's per-pixel rules.** That
+experiment would ask whether the gate's catches move R²: the cube with them in,
+against the cube with them refused.
 
 ## Setup
 
 | Item | Choice |
 |---|---|
 | Cube | 2019, job 247673. One row per station and S1 pass. S1 VV/VH and S2 B02–B12 at the station pixel; 5 cm in-situ soil moisture |
-| Gates | all five, run per sample on the real layers when the cube was built. **Geometry in point mode** (PLAN.md, "Geometry mode") |
+| Gates | all five, run per sample on the real layers when the cube was built. **Geometry in point mode** (PLAN.md, "Geometry mode"). **Quality at chip level before (job 247696), at the station pixel after (job 247798)** |
 | Bounds | **as declared**: S1 ≥ 1e-5; B02 in [50, 12000]; other S2 bands in [0, 12000] (PLAN.md, "Quality bounds") |
-| Arms | baseline: a sample is kept unless any gate refuses it. "Without *g*": *g*'s refusals are ignored, every other gate applies. Supplementary: geometry in grid mode, the design not selected |
+| Arms | baseline: a sample is kept unless any gate refuses it. "Without *g*": *g*'s refusals are ignored, every other gate applies. Supplementary: geometry in grid mode, the design not selected; after the change, also quality at chip level |
 | Folds | **stratified station blocks** (`experiments/open_cube/blocks.py`): k-means on the 13 western stations into 4 blocks, one of ITCSM_01/04/07/09 added to each. Not `eocube.pipeline.spatial_block_split`, which splits a pixel grid |
 | Partitions | **5 block partitions** (seeds 0–4). The seed changes which stations fall in which fold; it also sets the forest's random state |
 | Model | random forest, 300 trees (`eocube.baselines.make_random_forest`), same for every arm. 8 features: S1 VV, VH (linear), S2 B02–B12 (DN) |
@@ -60,7 +145,7 @@ prediction would leave the residual unchanged and only shrink the denominator. A
 run (job 247692) did that and reported anomaly R² ≈ −22. Absolute R², ΔR² and the
 refusals were identical between the two runs.
 
-## Summary table
+## Summary table (before: chip-level quality, job 247696)
 
 20 folds per arm (5 partitions × 4 folds). R² on each arm's own accepted test samples,
 mean ± sd across folds. ΔR² paired, mean ± sd. **Decisions**: gate verdicts of
@@ -88,7 +173,26 @@ none).
 
 Removing a gate removes its decisions; only the quality gate also changes the samples.
 
-## Per-fold deltas
+## Summary table (after: station-pixel quality, job 247798)
+
+Same folds, model and conventions as above.
+
+| Arm | Kept | Refusal rate | Decisions (per sample) | R² absolute | **ΔR² absolute** | R² anomaly | **ΔR² anomaly** | Reading |
+|---|---|---|---|---|---|---|---|---|
+| **All gates active** | 3,505 | 0.0% | 8,927 (2.55) | −0.359 ± 1.370 | — | −3.014 ± 3.109 | — | baseline |
+| without geometry_crs | 3,505 | 0.0% | 5,422 (1.55) | −0.359 ± 1.370 | 0.000 | −3.014 ± 3.109 | 0.000 | below detection limit on this task: refused nothing |
+| without resolution | 3,505 | 0.0% | 5,422 (1.55) | −0.359 ± 1.370 | 0.000 | −3.014 ± 3.109 | 0.000 | below detection limit on this task: refused nothing |
+| without temporal_alignment | 3,505 | 0.0% | 7,512 (2.14) | −0.359 ± 1.370 | 0.000 | −3.014 ± 3.109 | 0.000 | below detection limit on this task: refused nothing |
+| **without quality_missingness** | 3,505 | 0.0% | 8,425 (2.40) | −0.359 ± 1.370 | **0.000** | −3.014 ± 3.109 | **0.000** | below detection limit on this task: refused nothing |
+| without sensor_physics | 3,505 | 0.0% | 8,927 (2.55) | −0.359 ± 1.370 | 0.000 | −3.014 ± 3.109 | 0.000 | below detection limit on this task: refused nothing |
+| *geometry in grid mode* | 2,526 | 27.9% | 3,859 (1.53) | −0.351 ± 1.420 | +0.031 ± 0.059 | −2.831 ± 3.202 | +0.247 ± 0.391 | absolute: below detection limit on this task. Anomaly: above it, against grid mode |
+| *quality at chip level (before)* | 3,395 | 3.1% | 8,566 (2.52) | −0.404 ± 1.479 | −0.033 ± 0.052 | −3.196 ± 3.350 | −0.193 ± 0.223 | the before result, sign reversed against the new baseline |
+
+The quality gate's decisions rise from 392 to 502: the 110 former refusals are now
+recorded as chip-level decisions. The grid-mode arm differs slightly from before
+(2,526 kept, not 2,475), because the 110 quality refusals no longer overlap it.
+
+## Per-fold deltas (before: chip-level quality)
 
 Paired ΔR² per fold, absolute / anomaly.
 
@@ -129,7 +233,7 @@ Paired ΔR² per fold, absolute / anomaly.
 
 The four identical arms are 0.000 in every fold.
 
-## East/west breakdown (secondary)
+## East/west breakdown (secondary; before: chip-level quality)
 
 **Descriptive only. It rests on 4 eastern stations; no significance is claimed.**
 Per-station paired ΔR² within each test fold, averaged over folds and partitions:
@@ -229,7 +333,7 @@ per-pixel rules at the station.
 
 The naive chips were fetched: 659 chips, 6.7 MB stored, 1 min 26 s.
 
-**Gate refusals by rule.** Geometry in point mode. "Changed" means samples that differ
+**Gate refusals by rule** (job 247702, before the station-pixel change). Geometry in point mode, quality at chip level. "Changed" means samples that differ
 from the protected cube in S1 file, S2 file or S2 time.
 
 | Rule | Samples | Changed | Point geometry | Resolution | **Temporal** | **Quality** | Sensor physics | Changed samples refused by any gate |
@@ -258,7 +362,8 @@ from the protected cube in S1 file, S2 file or S2 time.
      before the gates is not verified.
 3. **Edge checks: redundant in this cube.** All 12 `station_measured: false` chips
    also fail build_cube's per-pixel SCL/B02 rule; skipping the tag changes no sample.
-4. **Per-pixel validity is enforced only upstream.** With the per-pixel rules off as
+4. **Per-pixel validity was enforced only upstream** (fixed since; "Station-pixel validity:
+   before and after"). With the per-pixel rules off as
    well, **1,123 of the 3,234 changed samples pass every gate.** By construction, these
    are samples whose station pixel the per-pixel rules reject: cloud, shadow, water or
    fill in S2, or S1 nodata. No gate judges the station pixel; the quality gate judges
@@ -280,8 +385,59 @@ from the protected cube in S1 file, S2 file or S2 time.
   removed.
 - **three were silent because this point-read design has no place for their failures.**
 
-The one gap runs the other way: **the station pixel's own validity is enforced only
-upstream**, and no gate would catch its loss.
+The one gap ran the other way: **the station pixel's own validity was enforced only
+upstream**, and no gate would have caught its loss. The station-pixel quality gate now
+does: 1,123 passing samples became 26.
+
+## Validation: the silent gates under induced failures
+
+**Not part of the ablation, and the method is unchanged.** This is evidence that the
+three gates that never fired are not blind. Job 247800,
+`experiments/open_cube/perturb_gates.py`: 20 real samples, spread across all 17 stations.
+Each failure was applied to every sample, then all five gates ran, with geometry and
+quality in point mode. The cube's files were not touched; perturbed chips are copies.
+**Cases where a gate should not fire are included on purpose**, so that the test can
+tell blindness from absence.
+
+| Induced failure | Gate expected to fire | Geometry | Resolution | Temporal | Quality | Sensor physics |
+|---|---|---|---|---|---|---|
+| none (unperturbed) | — | 0/20 | 0/20 | 0/20 | 0/20 | 0/20 |
+| G1 S2 chip from another station (a join error) | geometry | **20/20** | 0 | 0 | 20/20 | 0 |
+| G2 S2 CRS mislabelled, zone 31 ↔ 32 | geometry | **20/20** | 0 | 0 | 20/20 | 0 |
+| G3 S2 transform shifted 2 km | geometry | **20/20** | 0 | 0 | 20/20 | 0 |
+| G4 S2 transform shifted 30 m | none: **blind** | 0/20 | 0 | 0 | 0 | 0 |
+| R1 native layers, declared 10 m target (20 m bands would be upsampled) | resolution | 0 | **20/20** | 0 | 0 | 0 |
+| R2 the same, upsampling allowed | none: recorded as a decision | 0 | 0/20 | 0 | 0 | 0 |
+| R3 S2 already resampled onto a shared 10 m grid | none: **blind** | 0 | 0/20 | 0 | 0 | 0 |
+| G5 that shared grid, grid-mode geometry, one band shifted 0.3 px | geometry | **20/20** | 0 | 0 | 0 | 0 |
+| G6 that shared grid, grid-mode geometry, unshifted | none | 0/20 | 0 | 0 | 0 | 0 |
+| S1 SAR units undeclared | sensor physics | 0 | 0 | 0 | 0 | **20/20** |
+| S2 SAR declared not terrain-corrected | sensor physics | 0 | 0 | 0 | 0 | **20/20** |
+| S3 SAR declared uncalibrated | sensor physics | 0 | 0 | 0 | 0 | **20/20** |
+| S4 dB layers averaged (`mean(S1_VV, S1_VH)`), declared dB | sensor physics | 0 | 0 | 0 | 0 | **20/20** |
+| S5 optical-radar normalised difference | sensor physics | 0 | 0 | 0 | 0 | **20/20** |
+| S6 dB values declared as linear | sensor physics **blind**; quality catches | 0 | 0 | 0 | **20/20** | 0/20 |
+
+**Every gate fired on every sample where its failure was present, and nowhere else.**
+The station-pixel quality gate also caught G1–G3 (the station lies outside the chip)
+and S6. In S6 the sample pixel reads −15.3, below the declared S1 floor of 1e-5:
+plausibility at the pixel catches a units error that the declaration-only physics
+gate cannot see.
+
+**Where the gates are blind, by design:**
+- **G4, a georeferencing error smaller than the chip.** Point mode checks that each
+  layer was read where its own metadata says the station is. If the metadata is wrong
+  by 30 m, the pixel read is wrong by 30 m and nothing in the metadata shows it.
+  Detecting that needs image matching against a reference, which no gate does.
+- **R3, upsampling already done.** A band resampled to 10 m before description
+  reports 10 m. The resolution gate prevents upsampling at assembly; it cannot detect
+  it after the fact without a declared native resolution.
+- **S6 for the physics gate.** Sensor physics checks declarations and expressions, not
+  values. A wrong declaration passes it; the plausible range is what catches it.
+
+**What this establishes.** On the real cube, geometry, resolution and sensor physics
+were silent because their failures were absent, not because the gates cannot see them,
+for every failure tested here. The blind cases above bound that claim.
 
 ## Caveats
 
@@ -302,7 +458,12 @@ upstream**, and no gate would catch its loss.
 ## Reproduce
 
 ```bash
-cd ~/work/logs && sbatch -A mif76448_mif ~/eocube/scripts/ablation.sbatch 2019 5
+cd ~/work/logs
+sbatch -A mif76448_mif ~/eocube/scripts/build_cube.sbatch 2019          # gates, both quality modes
+sbatch -A mif76448_mif ~/eocube/scripts/ablation.sbatch 2019 5          # after it finishes
+sbatch -A mif76448_mif ~/eocube/scripts/diagnose.sbatch skill
+sbatch -A mif76448_mif ~/eocube/scripts/diagnose.sbatch bypass-fetch     # then bypass-assemble
+sbatch -A mif76448_mif ~/eocube/scripts/diagnose.sbatch perturb
 ```
 
 `experiments/open_cube/run_ablation.py` reads the cube's `samples.csv` and `gates.json`

@@ -6,9 +6,11 @@ fixed in PLAN.md ("Generalisation to unseen stations") before any result.
 
 - **Jobs:**
   - 247810: auxiliary data and Arm A; 4 min 16 s, 0.28 CPU-hours;
-  - 247812: Arm B; 3 min 44 s, 0.25 CPU-hours.
+  - 247812: Arm B; 3 min 44 s, 0.25 CPU-hours;
+  - 247845: Arm C, the radar normalised by its own history; 5 min 27 s, 0.36 CPU-hours.
 - **Script:** `experiments/open_cube/generalisation.py`.
-- **Results:** `~/work/results/open_cube/generalisation_2019/arm_a.json` and `arm_b.json`;
+- **Results:** `~/work/results/open_cube/generalisation_2019/arm_a.json`, `arm_b.json` and
+  `arm_c.json`;
   station values in `~/work/data/cubes/open_cube/2019/station_aux.json`.
 - **Setup, as in the main study:**
   - the same 3,505 samples;
@@ -62,8 +64,28 @@ fixed in PLAN.md ("Generalisation to unseen stations") before any result.
    within-station signal that the metric barely weighs and the model does not use, so R²
    did not move.
 
-**Plainly: neither arm fixes generalisation. Both fail for reasons that can be named,**
-and they point to one specific next step ("What would address it").
+4. **Arm C, the last arm: normalising the radar by its own history did not change
+   that.** VV and VH were z-scored (dB) or percentile-ranked per station and orbit, from
+   2019 radar only. That removes the between-station term exactly: the between-station
+   share is 0.0000. The within-station signal stays: r 0.313 (z) and 0.318 (rank).
+   - **With the optical bands present, VV is still unused:** importance +0.001 (z) and
+     +0.004 (rank). ΔR² is +0.001 and −0.004 at the median.
+   - **Alone, VV is used** (importance +0.067 and +0.065), **and the model is worse.**
+     Absolute R² falls to −0.19, below predicting the training mean. Anomaly R² falls to
+     −3.05 and −2.74.
+   - **Normalising the optical as well does not remove its importance** (B11 +0.108 to
+     +0.298). R² stays where the baseline was (−0.052 and −0.008 against −0.058).
+
+**Plainly: this network cannot support spatial generalisation of soil moisture with these
+inputs, and the study stops here.**
+- **The within-station radar signal is real:** r ≈ 0.31, and it survives normalisation
+  intact.
+- **It is too weak to matter on this target.** Used alone it makes predictions at unseen
+  stations worse; beside the optical bands it is ignored.
+- **No arm placed a station's level, and none tracked its anomalies.** Anomaly R² was below
+  zero in every arm that did not predict a constant.
+
+No further arm is proposed.
 
 ## What the literature does that we do not
 
@@ -262,23 +284,103 @@ target and in the sign:**
 to 0.40, a within-station improvement. R² did not move, because the model did not use VV
 and the metric rewards the between-station level (docs/window_size.md).
 
-## What would address it
+## Arm C: radar normalised by its own history (the last arm)
 
-**Not run here; each is a decision.**
+Design fixed in PLAN.md ("Radar normalised by its own history") before the run.
 
-1. **Normalise each station's radar by its own history** before modelling: VV minus the
-   station's own mean, or scaled by its own min and max over the year (Batchu et al.;
-   Δσ/Δσmax in the change-detection method). This removes the between-station term with
-   the wrong sign and keeps the within-station signal. **It uses only the unseen
-   station's radar, never its soil moisture,** so it does not leak. The cheapest and
-   most targeted next test: no new data, about 0.3 CPU-hours.
-2. **Accept that the level cannot be placed from these inputs,** and evaluate anomaly
-   tracking separately: train and score on station-demeaned targets. That is a
-   different, honest question.
-3. **A regional soil-moisture reference** (SMAP, about 9–36 km) for the shared anomaly.
-   Open data, but a new download with its own licence check.
-4. **Better static data** at field scale: a groundwater-depth or soil map at 1:50,000
-   (the Dutch BRO), not a global 250 m product. This is a licence question first.
+**What was done:**
+- **VV and VH in dB** were normalised per station and relative orbit, using only that
+  station-orbit's 2019 radar values in the cube, never soil moisture. Two variants:
+  - z-score: (x − mean) / sd;
+  - percentile rank, 0 to 1.
+- **For arm 4,** each optical band was normalised per station by the same method.
+- **This uses no labels from the held-out station, but it is transductive:** a station's
+  statistics include its own test passes, as a deployed retrieval with a radar history
+  would.
+
+**The construction check:**
+
+| | VV | VH | B11 | Station means: r(VV, SM) | Within station-orbit: median r(VV, SM) |
+|---|---|---|---|---|---|
+| Raw, between-station share | 0.151 | 0.052 | 0.084 | −0.340 | 0.313 |
+| z-score, between-station share | **0.0000** | **0.0000** | **0.0000** | (−0.26; the means are all ~0) | **0.313** |
+| Percentile rank, between-station share | **0.0000** | **0.0000** | **0.0000** | (+0.12; the means are all ~0) | **0.318** |
+
+- **The between-station term is gone,** and the within-station signal is unchanged.
+- **The correlation of station means after normalisation is computed over values that are
+  all close to zero.** It only reflects how each station's passes are split between
+  orbits, and carries no information.
+
+**Results** (20 folds; R² median, with the mean in brackets; ΔR² paired against the
+baseline):
+
+| Arm | R² absolute | Anomaly R² | ΔR² absolute | ΔR² anomaly | Importance (top, and VV) |
+|---|---|---|---|---|---|
+| 1 Baseline, 8 raw | −0.058 (−0.359) | −1.694 | — | — | B11 +0.233, B02 +0.102, B04 +0.073; **VV +0.001** |
+| 2 z radar + raw optical | −0.053 (−0.359) | −1.722 | −0.000 ± 0.012, med +0.001, 10/20 | −0.080 ± 0.325, med −0.016 | B11 +0.227, B02 +0.096; **VV_z +0.001** |
+| 3 z radar only | −0.191 (−0.576) | −3.050 | −0.217 ± 0.243, med −0.186, 3/20 | −0.857 ± 2.703, med −0.350 | **VV_z +0.067**, VH_z +0.007 |
+| 4 z radar + z optical | −0.052 (−0.405) | −2.260 | −0.046 ± 0.180, med −0.034, 8/20 | +0.410 ± 1.273, med +0.250 | B08_z +0.116, B11_z +0.108; **VV_z +0.007** |
+| 2 rank radar + raw optical | −0.057 (−0.363) | −1.768 | −0.004 ± 0.014, med −0.004, 9/20 | −0.112 ± 0.407, med −0.023 | B11 +0.220, B02 +0.091; **VV_rank +0.004** |
+| 3 rank radar only | −0.211 (−0.583) | −2.744 | −0.225 ± 0.193, med −0.181, 2/20 | −0.993 ± 2.447, med −0.722 | **VV_rank +0.065**, VH_rank −0.024 |
+| 4 rank radar + rank optical | −0.008 (−0.417) | −2.739 | −0.059 ± 0.435, med +0.046, 13/20 | −0.082 ± 1.375, med −0.183 | B11_rank +0.298, B02_rank +0.296; **VV_rank +0.010** |
+
+### Does VV finally get used?
+
+**Only when it is the only feature, and then it makes the model worse.**
+- **Arms 2 and 4:** with any optical band beside it, normalised VV's importance stays at
+  +0.001 to +0.010, the same as raw VV.
+- **Arm 3:** alone, it reaches +0.065 to +0.067. Shuffling it costs that much held-out R²,
+  so the forest does use it.
+- **But arm 3's absolute R² (−0.19, −0.21)** is below the training-mean predictor (median
+  about −0.02 to −0.03, docs/open_ablation.md), and well below the baseline. Its anomaly R²
+  (−3.05, −2.74) is worse than the baseline's.
+
+A within-station correlation of 0.31 explains about 10% of a station's variance at best.
+Fitted by a forest across 13 stations, it adds more prediction variance than signal.
+
+**This is the case the interpretation rules name in advance: VV gets used, and R² does
+not improve.** The within-station radar signal is real, survives normalisation intact,
+and is too weak to matter on this target.
+
+### Was B11 used for the right reason?
+
+**Partly.** Arm 4 removes every between-station term from the optical as well, yet the
+normalised optical bands stay the most important features (B11 +0.108 to +0.298). They
+carry within-station information, most likely the seasonal cycle shared by vegetation and
+soil moisture (32% of the target's variance is seasonal; PLAN.md).
+
+Arm 4's absolute R² equals the baseline's (−0.052 and −0.008 against −0.058). Two readings
+follow:
+- **B11's consistent between-station sign bought nothing measurable;** and
+- **the baseline was never placing station levels:** it does no better than a model that
+  has no level information at all.
+
+Arm 4's anomaly R² stays far below zero (−2.26, −2.74), so the seasonal information does
+not become moisture tracking either.
+
+## Conclusion: the study stops here
+
+**This network cannot support spatial generalisation of soil moisture from these inputs.**
+
+| Test | Result |
+|---|---|
+| Static soil and terrain (Arm A) | SoilGrids does not distinguish the stations; absolute R² worse |
+| Change detection (Arm B) | Does not beat predicting no change |
+| Radar normalised by its own history (Arm C) | VV used only alone, and then worse; never used beside the optical |
+| Every arm | No anomaly R² above zero, except arms that predict a constant within a station-month (exactly 0 by construction) |
+
+**What this means:**
+- **The within-station signal exists:** r(VV, SM) ≈ 0.31 per station, 0.40 with a 9 × 9
+  window, unchanged by normalisation.
+- **With 17 stations and these features, it cannot be turned into a prediction at a
+  station the model has not seen.**
+- **This is a finding about the network and the inputs, not a step to be engineered
+  around.** Per the rules fixed before this arm, no further arm is proposed.
+
+**For the contract study, it confirms what docs/open_ablation.md already reported:** the
+downstream task on which the gates were ablated has no skill at unseen stations, and that
+does not change with the feature set. Whether contracts improve accuracy has to be tested
+on a task where the model works.
 
 ## Limits
 

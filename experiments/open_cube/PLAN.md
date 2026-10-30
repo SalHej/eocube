@@ -575,6 +575,12 @@ in-situ availability (flags, frozen soil), never on its value.
 - **If neither happens,** this network cannot support spatial generalisation of soil
   moisture, and the study stops there.
 
+*Result 2026-10-30 (job 247845; docs/generalisation.md, "Arm C"): normalised VV is used
+only when it is the only feature (importance +0.065), and then R2 is worse (-0.19). Beside
+the optical bands it stays unused (+0.001 to +0.010). No arm improves R2. **The study stops
+here: this network cannot support spatial generalisation of soil moisture from these
+inputs.***
+
 ## Download size and placement
 
 **Where data lives.** On the laptop, `data/` in the repo is a directory junction to

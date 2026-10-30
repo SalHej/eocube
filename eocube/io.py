@@ -141,9 +141,9 @@ def _sample_pixel(src, lon: float, lat: float, *, assumed_nodata: float | None =
     It also records the value at that pixel and whether it is an observation: nodata
     or non-finite in any band, or outside the declared ``plausible_range``. In a
     point-sampled cube that pixel is the sample. Layer-level fractions describe the
-    rest of the chip, which the sample never uses: on the 2019 Twente cube, 1,123
-    samples read through cloud, shadow, water or fill at the station passed every
-    layer-level gate (docs/open_ablation.md).
+    rest of the chip, which the sample never uses: on the 2019 Twente cube, with
+    assembly's per-pixel rules removed, 1,103 samples read through cloud, shadow,
+    water or fill at the station passed every layer-level gate (docs/open_ablation.md).
     """
     from rasterio.warp import transform as _tr
     x, y = _tr("EPSG:4326", src.crs, [lon], [lat])

@@ -506,7 +506,7 @@ def check_quality_missingness(
     QA class not in the declared ``qa_valid_classes``. Everything above is still
     measured, but it describes the rest of the chip, which the sample never uses, so
     it is recorded as a decision rather than refused. In grid mode the 2019 Twente cube
-    was refused 110 times for pixels that were not the sample, while 1,123 samples
+    was refused 110 times for pixels that were not the sample, while 1,103 samples
     read through cloud, shadow, water or fill at the station would have passed
     (docs/open_ablation.md). Point mode reverses both. A layer with a QA mask but no
     QA class read at the sample pixel is reported as unchecked, not as valid.

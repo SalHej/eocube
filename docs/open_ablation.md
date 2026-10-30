@@ -24,7 +24,7 @@ cluster.
 3. **The temporal check had moved upstream, into assembly, and the gate fires when
    that is removed.** Allowing an S2 scene after the pass gave 1,875 leaked samples;
    the temporal gate refused all 1,875.
-4. **The framework judged layers, not the sample pixel, and 1,123 samples passed
+4. **The framework judged layers, not the sample pixel, and 1,103 samples passed
    through it with invalid station pixels.** These were stations read through cloud,
    shadow, water or fill, in the cube built with assembly's per-pixel rules removed.
    Every gate passed them, because every gate looked at the 1 km chip and none at the
@@ -43,8 +43,9 @@ chip-level anomalies as decisions. Measured on the same cube:
 - **its 110 refusals are gone;**
 - **so is its negative effect on accuracy:** anomaly ΔR² was +0.193 when it was
   removed; now it is 0.000;
-- **of the 1,123 invalid-pixel samples, all but 26 are now refused** ("Station-pixel
-  validity: before and after").
+- **all 1,103 invalid-pixel samples are now refused, and no sample with an invalid
+  station pixel passes.** The 26 changed samples that still pass were inspected one by
+  one; every station pixel is valid ("Station-pixel validity: before and after").
 
 The three gates that never fired were then given their failures on purpose. Each fired
 on 20 of 20 samples. Each also stayed silent in the cases where it is blind by design,
@@ -87,7 +88,7 @@ The 110 became decisions, as their causes were all away from the station pixel. 
 rebuilt cube's chip-level verdicts match the previous build for all 3,505 samples, so
 the "before" arm is a reproduction, not an approximation.
 
-**The documented cube grew; it did not shrink.** The 1,123 invalid-pixel samples were
+**The documented cube grew; it did not shrink.** The 1,103 invalid-pixel samples were
 never in it: assembly's per-pixel rules (SCL 4/5, B02 ≥ 50, S1 not nodata) had already
 excluded them, before any gate ran. They exist only in the bypassed cube below. So on
 the documented cube, station-pixel quality refuses nothing and returns the 110.
@@ -146,15 +147,31 @@ supplementary arm: against the new baseline it scores −0.033 ± 0.052 (absolut
 | first tile / first frame | 215 | 65 (chip rigidity; station pixels valid) | **0** |
 | S2 after the pass allowed | 1,875 | 1,875 (temporal) | 1,875 (temporal) |
 | all three bypassed | 1,979 | 1,909 | 1,874 |
-| all three + per-pixel rules off | 3,234 | 2,111, so **1,123 pass** | **3,208, so 26 pass** |
+| all three + per-pixel rules off | 3,234 | 2,111, so **1,123 pass** (1,103 with an invalid station pixel) | **3,208, so 26 pass** (0 with an invalid station pixel) |
 
 - With assembly's per-pixel rules removed, the station-pixel gate alone refuses 2,614
   of the changed samples. **It now does the job those rules did.**
 - On the tile-choice changes, it refuses none of the 215; the chip-level gate refused
   65. Those stations' pixels were valid.
-- **The 26 that still pass were not examined individually.** The likeliest source is
-  tile-choice changes with valid station pixels, which the first-tile arm shows pass
-  (0 of 215 refused). This is not verified.
+- **The 26 that still pass: inspected individually, none is invalid** (jobs 247801 and
+  247802, `experiments/open_cube/inspect_residual.py`).
+  - **Every one reads its S2 value from the naive first-tile chip** rather than the
+    fetcher's best-scoring tile. 24 take the same date as the protected cube in another
+    tile. 2 (ITCSM_14) take 2019-02-07, where the protected cube used 2019-01-21.
+  - **Every station pixel passes all of build_cube's per-pixel rules:** SCL 4 or 5, B02
+    from 65 to 505 DN against the floor of 50, and S1 VV and VH valid.
+  - **The fetcher scored the station pixel as measured in every first tile.** For 19 of
+    the 20 station-dates, the best tile won only on chip coverage, mostly by under 1%.
+  - **So "changed" did not mean "invalid" for these 26.** It is a definitional artefact
+    of counting changed samples, not a residual gap.
+  - **The 1,123 contained 20 of them;** the chip-level gate refused the other 6. So the
+    layer-level framework passed **1,103** samples with invalid station pixels, and the
+    station-pixel gate passes **0**.
+  - **One borderline case, recorded, not counted as a gap.** At ITCSM_15 on 2019-11-19
+    (one sample), the first tile's station pixel is valid (SCL 4, B02 65 DN), but 7 of
+    its 8 neighbours were not measured by the fetcher's criteria. That window score is
+    why the fetcher chose another tile. No gate looks at a pixel's neighbourhood: see
+    the fourth blind spot under "Validation".
 
 **The ablation has not been re-run on a cube without assembly's per-pixel rules.** That
 experiment would ask whether the gate's catches move R²: the cube with them in,
@@ -407,10 +424,11 @@ from the protected cube in S1 file, S2 file or S2 time.
    also fail build_cube's per-pixel SCL/B02 rule; skipping the tag changes no sample.
 4. **Per-pixel validity was enforced only upstream** (fixed since; "Station-pixel validity:
    before and after"). With the per-pixel rules off as
-   well, **1,123 of the 3,234 changed samples pass every gate.** By construction, these
-   are samples whose station pixel the per-pixel rules reject: cloud, shadow, water or
-   fill in S2, or S1 nodata. No gate judges the station pixel; the quality gate judges
-   the chip (PLAN.md, the next open decision).
+   well, **1,123 of the 3,234 changed samples pass every gate.** 1,103 of these have a
+   station pixel the per-pixel rules reject: cloud, shadow, water or fill in S2, or S1
+   nodata. The other 20 are tile-choice changes with valid station pixels (inspected
+   later; "Station-pixel validity: before and after"). No gate judged the station
+   pixel; the quality gate judged the chip.
 5. **Geometry, resolution and sensor physics refused nothing under any rule.** None of
    the bypassed protections concerns them. Their failures are absent by the pipeline's
    design:
@@ -430,7 +448,7 @@ from the protected cube in S1 file, S2 file or S2 time.
 
 The one gap ran the other way: **the station pixel's own validity was enforced only
 upstream**, and no gate would have caught its loss. The station-pixel quality gate now
-does: 1,123 passing samples became 26.
+does: of 1,103 invalid-pixel samples that passed, none passes.
 
 ## Validation: the silent gates under induced failures
 
@@ -494,6 +512,14 @@ gaps worth closing:
   `describe()` already records.
 
 G4 needs image matching, which is out of scope for a metadata gate.
+
+**A fourth limit, by design, from the residual inspection: the neighbourhood.** The
+station-pixel gate judges one pixel. A valid pixel at the edge of valid data passes,
+even with most of its neighbours unmeasured; one such sample occurs in the bypassed
+cube (ITCSM_15, 2019-11-19). That is consistent with point sampling, where the pixel
+is the sample. It matters only where the pixel's value is suspected of mixing with
+fill or of being misregistered. The fetcher's 3 × 3 window score is the only check on
+it, and it runs upstream.
 
 **What this establishes.** On the real cube, geometry, resolution and sensor physics
 were silent because their failures were absent, not because the gates cannot see them,

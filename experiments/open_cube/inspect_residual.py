@@ -83,7 +83,8 @@ def main():
                "protected_s2_time": old["s2_time"][:16] if old else None,
                "s2_file": f2["B02"].name, "scl": scl, "b02": b02, "vv": vv, "vh": vh,
                "pixel_rules_accept_s2": s2_ok, "pixel_rules_accept_s1": s1_ok,
-               "station_measured": flag, "bypassed_chip": "open_cube_bypass" in str(f2["B02"])}
+               "station_measured": flag, "bypassed_chip": "open_cube_bypass" in str(f2["B02"]),
+               "chip_quality_verdict": p["quality_missingness"]}
         rows.append(rec)
         why[(diff, s2_ok and s1_ok, flag)] += 1
     for r in rows:
@@ -91,6 +92,8 @@ def main():
     print("\nsummary: (differs by, per-pixel rules accept, station_measured) -> count")
     for k, n in why.most_common():
         print(f"  {k}: {n}")
+    chip = collections.Counter(r["chip_quality_verdict"] for r in rows)
+    print(f"chip-level quality verdict on these samples: {dict(chip)}")
 
 
 if __name__ == "__main__":

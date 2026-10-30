@@ -530,6 +530,51 @@ beat predicting no change. VV is unused at held-out stations because its relatio
 soil moisture changes sign between and within stations. Next: normalise each station's
 radar by its own history (no labels needed).*
 
+## Radar normalised by its own history: design, fixed before any result (2026-10-30)
+
+**The last generalisation arm.** No new data. Reported in docs/generalisation.md.
+
+**Diagnosis it follows from** (docs/generalisation.md, "Why the radar is unused"): VV
+relates to soil moisture with opposite signs.
+- **Within a station,** median r is +0.31.
+- **Across station means,** r is -0.34.
+- **The result:** the forest uses B11 instead (consistent sign, r -0.47), and VV's
+  importance is +0.001.
+
+Normalising each station's radar by its own history removes the between-station term
+and keeps the within-station one.
+
+**Normalisation:** per station and relative orbit, using only the 2019 radar values of
+that station-orbit's samples in the cube, never soil moisture. Two variants:
+- **z-score in dB:** (x - station-orbit mean) / station-orbit sd;
+- **percentile rank** within the station-orbit (0 to 1).
+
+**This uses no labels from the held-out station, but it is transductive.** A held-out
+station's statistics include its own test passes, which is legitimate for a deployed
+retrieval that has a station's radar history. The samples were selected partly on
+in-situ availability (flags, frozen soil), never on its value.
+
+**Arms**, with the same folds, model and 5 partitions; arms 2-4 in both variants:
+1. baseline (8 raw features);
+2. normalised VV, VH + raw optical;
+3. normalised VV, VH only;
+4. normalised VV, VH + optical normalised per station by the same method. This tests
+   whether the model used B11 for its information or only for its consistent
+   between-station sign.
+
+**Reported:**
+- absolute and anomaly R2;
+- permutation importance for every arm. **Whether VV is used is the primary result;**
+- the between-station share of variance of each normalised feature (near zero by
+  construction);
+- r between station means of normalised VV and soil moisture.
+
+**Interpretation, fixed in advance:**
+- **If VV is used but R2 does not improve,** the within-station signal is real and too
+  weak for this target.
+- **If neither happens,** this network cannot support spatial generalisation of soil
+  moisture, and the study stops there.
+
 ## Download size and placement
 
 **Where data lives.** On the laptop, `data/` in the repo is a directory junction to

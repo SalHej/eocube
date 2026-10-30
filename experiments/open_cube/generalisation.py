@@ -15,6 +15,9 @@ aux    Static features at each station, read at the station point (network; Slur
 arm-a  Static auxiliary features. Arms: baseline (the 8 pixel features), static only (7),
        baseline + static (15). The model cannot place an unseen station if nothing in its
        features distinguishes sandy from clay soil; this tests that.
+arm-c  Radar normalised by its own history: VV and VH z-scored (dB) or percentile-ranked
+       per station and relative orbit, from 2019 radar only, never soil moisture
+       (PLAN.md, "Radar normalised by its own history").
 arm-b  Change detection. Target: the change in soil moisture between consecutive S1 passes
        at one station, primarily within one relative orbit (viewing geometry cancels),
        secondarily across orbits. Features: change in VV and VH (dB difference, i.e. the
@@ -272,10 +275,89 @@ def arm_b(cube: Path, out: Path, seeds: int):
     (out / "arm_b.json").write_text(json.dumps(res, indent=1), encoding="utf-8")
 
 
+# ------------------------------------------------------------------- arm C
+def normalise(x, groups, kind):
+    """Per-group z-score or percentile rank (0..1) of x. Uses x only, never soil moisture."""
+    out = np.empty_like(x, dtype=float)
+    for g in np.unique(groups):
+        m = groups == g
+        v = x[m]
+        if kind == "z":
+            sd = v.std()
+            out[m] = (v - v.mean()) / sd if sd > 0 else 0.0
+        else:
+            out[m] = (np.argsort(np.argsort(v)) / (len(v) - 1)) if len(v) > 1 else 0.5
+    return out
+
+
+def between_share(x, groups):
+    mu = x.mean()
+    tot = ((x - mu) ** 2).mean()
+    b = sum((groups == g).sum() * (x[groups == g].mean() - mu) ** 2 for g in np.unique(groups)) / len(x)
+    return float(b / tot) if tot > 0 else float("nan")
+
+
+def arm_c(cube: Path, out: Path, seeds: int):
+    """Radar normalised per station and relative orbit by its own 2019 history."""
+    rows, y, stn, t, grp, orbit, Xb, Xs = load(cube)
+    so = np.array([f"{s}|{o}" for s, o in zip(stn, orbit)])
+    radar_db = 10 * np.log10(Xb[:, :2])
+    optical = Xb[:, 2:]
+    arms = {"1 baseline (8 raw)": (Xb, BASE)}
+    checks = {}
+    for kind, label in (("z", "z-score"), ("rank", "percentile rank")):
+        R = np.column_stack([normalise(radar_db[:, j], so, kind) for j in range(2)])
+        O = np.column_stack([normalise(optical[:, j], stn, kind) for j in range(optical.shape[1])])
+        rn, on = (f"VV_{kind}", f"VH_{kind}"), tuple(f"{b}_{kind}" for b in BASE[2:])
+        arms[f"2 {label} radar + raw optical"] = (np.hstack([R, optical]), rn + BASE[2:])
+        arms[f"3 {label} radar only"] = (R, rn)
+        arms[f"4 {label} radar + {label} optical"] = (np.hstack([R, O]), rn + on)
+        means_v = [R[stn == s, 0].mean() for s in sorted(set(stn))]
+        means_y = [y[stn == s].mean() for s in sorted(set(stn))]
+        within = [float(np.corrcoef(R[so == g, 0], y[so == g])[0, 1]) for g in np.unique(so) if (so == g).sum() >= 15]
+        checks[label] = {
+            "between_station_share": {n: between_share(R[:, j], stn) for j, n in enumerate(rn)} |
+                                     {n: between_share(O[:, j], stn) for j, n in enumerate(on)},
+            "between_station_orbit_share": {n: between_share(R[:, j], so) for j, n in enumerate(rn)},
+            "r_station_means_vv_sm": float(np.corrcoef(means_v, means_y)[0, 1]),
+            "r_within_station_orbit_vv_sm_median": st.median(within)}
+    raw_checks = {"between_station_share": {n: between_share(Xb[:, j] if j > 1 else radar_db[:, j], stn)
+                                            for j, n in enumerate(BASE)},
+                  "r_station_means_vv_sm": float(np.corrcoef([radar_db[stn == s, 0].mean() for s in sorted(set(stn))],
+                                                             [y[stn == s].mean() for s in sorted(set(stn))])[0, 1])}
+    print("raw: between-station share " + ", ".join(f"{k} {v:.3f}" for k, v in raw_checks["between_station_share"].items())
+          + f"; r(station mean VV dB, station mean SM) {raw_checks['r_station_means_vv_sm']:+.3f}")
+    for label, c in checks.items():
+        print(f"{label}: between-station share " + ", ".join(f"{k} {v:.4f}" for k, v in c["between_station_share"].items()))
+        print(f"   between station-orbit share {c['between_station_orbit_share']}; r(station means VV, SM) "
+              f"{c['r_station_means_vv_sm']:+.3f}; within station-orbit r(VV, SM) median "
+              f"{c['r_within_station_orbit_vv_sm_median']:+.3f}")
+    runs = []
+    for seed, k, te in folds(stn, seeds):
+        tr = ~te
+        base_r2 = base_r2a = None
+        for a, (X, names) in arms.items():
+            m = rf(seed).fit(X[tr], y[tr])
+            p = m.predict(X[te])
+            rec = {"arm": a, "seed": seed, "fold": k, "r2": r2(y[te], p), "r2a": anom_r2(y[te], p, grp[te]),
+                   "importance": perm_importance(m, X[te], y[te], names, seed)}
+            if base_r2 is None:
+                base_r2, base_r2a = rec["r2"], rec["r2a"]
+            else:
+                rec["d_r2"], rec["d_r2a"] = rec["r2"] - base_r2, rec["r2a"] - base_r2a
+            runs.append(rec)
+        print(f"  partition {seed} fold {k} done", flush=True)
+    S = summarise(runs, list(arms), ("r2", "r2a"))
+    show(S, f"ARM C: radar normalised by station-orbit history ({len(y)} samples, {len(runs) // len(arms)} folds)")
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "arm_c.json").write_text(json.dumps({"summary": S, "checks": checks, "raw_checks": raw_checks,
+                                                "runs": runs}, indent=1), encoding="utf-8")
+
+
 def main():
     sys.stdout.reconfigure(line_buffering=True)
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("stage", choices=("aux", "arm-a", "arm-b"))
+    ap.add_argument("stage", choices=("aux", "arm-a", "arm-b", "arm-c"))
     ap.add_argument("--cube", type=Path, required=True)
     ap.add_argument("--out", type=Path)
     ap.add_argument("--seeds", type=int, default=5)
@@ -285,6 +367,8 @@ def main():
         aux(cube)
     elif a.stage == "arm-a":
         arm_a(cube, a.out.expanduser(), a.seeds)
+    elif a.stage == "arm-c":
+        arm_c(cube, a.out.expanduser(), a.seeds)
     else:
         arm_b(cube, a.out.expanduser(), a.seeds)
 

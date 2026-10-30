@@ -168,8 +168,120 @@ The forest beats the training mean in 7 of 20 folds.
   for this task.**
 - **Why a random forest.** It is the repository's reference baseline, invariant to
   linear-vs-dB scaling, and needs no tuning. A different learner on the same eight
-  features would not supply the missing between-station information. The weakness is
-  in the features, not the learner.
+  features would not supply the missing between-station information. "Diagnostic: why
+  the model has no skill" locates the weakness in the features.
+
+## Diagnostic: why the model has no skill
+
+**Diagnostic only, not the result.** The spatial split above is the result. Job 247700,
+`experiments/open_cube/diagnose_skill.py`: same 3,395 samples, same features, same
+forest.
+
+| Split | RF absolute R² | Predicting each station's own training mean | RF anomaly R² |
+|---|---|---|---|
+| Spatial, stratified station blocks (the result) | median −0.073 | not available (station unseen) | median −1.90 |
+| **Within-station temporal** (diagnostic): interleaved month folds {1,5,9}, {2,6,10}, {3,7,11}, {4,8,12}; every station in train and test | pooled **0.184** (folds −0.07 to 0.37) | pooled **0.545** | pooled −2.42 |
+| Temporal, R² within one station (median over stations) | **−0.473** | −0.100 | −3.48 |
+
+**Signal at the pixel.** Per-station Pearson r of S1 VV (dB) with 5 cm soil moisture:
+- **median 0.29** over all passes, positive at 16 of 17 stations;
+- **median 0.30** within a single relative orbit, positive in 60 of 68 station-orbits
+  (orbit 88: 0.20; the others 0.32–0.35).
+
+**This is a feature problem first, not a generalisation problem.**
+- **With every station in training, the forest still fails.** Predicting each
+  station's training mean scores 0.55; the forest scores 0.18. Within a station it is
+  worse than that constant (−0.47). If the trouble were only transfer to unseen
+  stations, the temporal split would predict well. It does not.
+- **The radar signal exists but is weak.** r ≈ 0.3 explains about 9% of a station's
+  variance, and holding the orbit fixed barely changes it, so incidence angle is not
+  what hides it.
+- **Six of the eight features are optical reflectances.** They follow phenology and
+  illumination, not soil moisture. The forest fits them, and its predictions move
+  within a station more than the target does: anomaly R² of −2 to −3.5 under both
+  splits.
+- **The spatial split adds a second problem on top:** the level. Between-station
+  differences are 37% of the variance, and nothing in the features encodes soil.
+
+Not tested here: whether point-to-pixel scale (a 5 cm probe against a 10 m pixel)
+caps r near 0.3, as PLAN.md open question 1 anticipates.
+
+## Diagnostic: why four gates refused nothing
+
+**Tested by bypassing the protections, not by reasoning about them.** Jobs 247701
+(fetch) and 247702 (assemble), `experiments/open_cube/bypass_cube.py`. The cube is
+rebuilt under each rule and all five gates run on it. fetch_year.py and build_cube.py
+are unchanged.
+
+**Where the protections live.** fetch_year.py chooses the S2 tile and the S1 frame.
+**Temporal ordering is not in the fetcher:** fetch_year.py fetches every date, and
+build_cube.py's assembly takes S2 at or before the pass. Assembly also applies the
+per-pixel rules at the station.
+
+**How often they intervened in 2019** (from the fetch manifest):
+
+| Protection | Station-dates or passes changed |
+|---|---|
+| S2 best-scoring tile instead of the first containing one | 91 of 2,118, of which **14** for an unmeasured station pixel, 4 for the 3 × 3 window and **73 only on chip coverage** |
+| S1 next frame, first empty at the station | 11 of 3,977 |
+| S2 chip tagged `station_measured: false` | 12 |
+| (S2 dates where no tile contains the station: 313, all at ITCSM_01/04/07/09/08) | not a protection: there is no chip to take, under either rule |
+
+The naive chips were fetched: 659 chips, 6.7 MB stored, 1 min 26 s.
+
+**Gate refusals by rule.** Geometry in point mode. "Changed" means samples that differ
+from the protected cube in S1 file, S2 file or S2 time.
+
+| Rule | Samples | Changed | Point geometry | Resolution | **Temporal** | **Quality** | Sensor physics | Changed samples refused by any gate |
+|---|---|---|---|---|---|---|---|---|
+| protected (reproduces docs/cube_2019.md) | 3,505 | 0 | 0 | 0 | 0 | 110 | 0 | — |
+| first tile / first frame | 3,495 | 215 | 0 | 0 | 0 | 103 (65 changed) | 0 | **65 of 215 (30%)** |
+| S2 after the pass allowed | 3,716 | 1,875 | 0 | 0 | **1,875** | 179 (119 changed) | 0 | **1,875 of 1,875 (100%)** |
+| edge checks skipped | 3,505 | 0 | 0 | 0 | 0 | 110 | 0 | — |
+| all three bypassed | 3,705 | 1,979 | 0 | 0 | 1,874 | 165 (144 changed) | 0 | 1,909 of 1,979 (96%) |
+| all three + build_cube's per-pixel rules off | 3,816 | 3,234 | 0 | 0 | 1,905 | 447 (441 changed) | 0 | 2,111 of 3,234 (65%) |
+
+**What the gates catch, plainly:**
+1. **Temporal: the gate catches everything the ordering prevents.** Every one of the
+   1,875 samples given a later S2 scene was refused as temporal leakage. **In the main
+   cube, this enforcement had moved upstream, into assembly.** The gate refused nothing
+   because assembly never handed it a future scene, not because the data lacked the
+   failure.
+2. **Quality: the gate catches part of what tile choice prevents.** It refused 65 of
+   the 215 samples whose tile or frame changed, for out-of-range pixels in the chip
+   (98 B02-floor and 11 ceiling messages, 6 over 30% invalid). Most of the 91 swaps
+   were chip-coverage ties, not station-pixel protections. So these refusals are mostly
+   the chip-level rigidity already documented, not caught fill at the sample pixel.
+   - The 11 empty S1 frames never reached the gates: build_cube's own S1-nodata rule
+     dropped them (8 → 19 drops).
+   - Whether the 14 real station-pixel swaps are also screened by the per-pixel rule
+     before the gates is not verified.
+3. **Edge checks: redundant in this cube.** All 12 `station_measured: false` chips
+   also fail build_cube's per-pixel SCL/B02 rule; skipping the tag changes no sample.
+4. **Per-pixel validity is enforced only upstream.** With the per-pixel rules off as
+   well, **1,123 of the 3,234 changed samples pass every gate.** By construction, these
+   are samples whose station pixel the per-pixel rules reject: cloud, shadow, water or
+   fill in S2, or S1 nodata. No gate judges the station pixel; the quality gate judges
+   the chip (PLAN.md, the next open decision).
+5. **Geometry, resolution and sensor physics refused nothing under any rule.** None of
+   the bypassed protections concerns them. Their failures are absent by the pipeline's
+   design:
+   - every value is read at the station, on each source's own grid, with no
+     resampling, so there is nothing to misregister or upsample;
+   - units and calibration are declared per product.
+
+   These three are neither "prevented by the fetcher" nor shown to work here. Exercising
+   them needs a different perturbation: a shared-grid resample, or a mis-declared unit.
+   That was not done.
+
+**What this means for the study.** Of the four silent gates:
+- **one (temporal) was silent because validity enforcement had already moved upstream,
+  to assembly.** The gate catches the failure in full when that upstream step is
+  removed.
+- **three were silent because this point-read design has no place for their failures.**
+
+The one gap runs the other way: **the station pixel's own validity is enforced only
+upstream**, and no gate would catch its loss.
 
 ## Caveats
 

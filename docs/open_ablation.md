@@ -26,9 +26,11 @@ cluster.
    the temporal gate refused all 1,875.
 4. **The framework judged layers, not the sample pixel, and 1,123 samples passed
    through it with invalid station pixels.** These were stations read through cloud,
-   shadow, water or fill. Every gate passed them, because every gate looked at the
-   1 km chip and none at the one pixel the sample is. Meanwhile the quality gate
-   refused 110 samples for pixels the sample never used.
+   shadow, water or fill, in the cube built with assembly's per-pixel rules removed.
+   Every gate passed them, because every gate looked at the 1 km chip and none at the
+   one pixel the sample is. In the documented cube those rules had already kept such
+   samples out, so the flaw was masked there. Meanwhile the quality gate refused 110
+   samples for pixels the sample never used.
 
 **The fourth is the contribution.** A validity framework for point-sampled cubes that
 does not check the point being measured has a design flaw. That flaw stayed invisible
@@ -74,14 +76,48 @@ For this cube the S2 layers declare their own SCL chip as the QA mask, with vali
 classes 4 and 5: the rule assembly already applied. The bounds are unchanged
 (B02 ≥ 50, other bands ≤ 12,000, S1 ≥ 1e-5).
 
-**On the documented cube** (job 247797; samples identical):
+**On the documented cube** (job 247797; the same 3,505 assembled samples):
 
 | Quality gate | Refused | Pass with decision | Pass |
 |---|---|---|---|
 | Chip level (before) | 110 | 392 | 3,003 |
 | **Station pixel (after)** | **0** | 502 | 3,003 |
 
-The 110 became decisions, as their causes were all away from the station pixel.
+The 110 became decisions, as their causes were all away from the station pixel. The
+rebuilt cube's chip-level verdicts match the previous build for all 3,505 samples, so
+the "before" arm is a reproduction, not an approximation.
+
+**The documented cube grew; it did not shrink.** The 1,123 invalid-pixel samples were
+never in it: assembly's per-pixel rules (SCL 4/5, B02 ≥ 50, S1 not nodata) had already
+excluded them, before any gate ran. They exist only in the bypassed cube below. So on
+the documented cube, station-pixel quality refuses nothing and returns the 110.
+
+Samples kept by all five gates, per station:
+
+| Station | Assembled | Kept, chip-level quality | **Kept, station-pixel quality** |
+|---|---|---|---|
+| ITCSM_01 | 205 | 205 | 205 |
+| ITCSM_02 | 206 | 202 | 206 |
+| ITCSM_03 | 167 | 153 | 167 |
+| ITCSM_04 | 201 | 193 | 201 |
+| ITCSM_05 | 223 | 217 | 223 |
+| ITCSM_07 | 205 | 191 | 205 |
+| ITCSM_08 | 220 | 188 | 220 |
+| ITCSM_09 | 172 | 172 | 172 |
+| ITCSM_10 | 200 | 200 | 200 |
+| ITCSM_11 | 217 | 210 | 217 |
+| ITCSM_12 | 231 | 231 | 231 |
+| ITCSM_13 | 223 | 219 | 223 |
+| ITCSM_14 | 229 | 229 | 229 |
+| ITCSM_15 | 146 | 140 | 146 |
+| ITCSM_16 | 209 | 205 | 209 |
+| ITCSM_17 | 234 | 223 | 234 |
+| ITCSM_18 | 217 | 217 | 217 |
+| **Total** | **3,505** | **3,395** | **3,505** |
+
+**No station lost samples, so every fold is still supported.** The smallest station
+keeps 146 (ITCSM_15). The smallest test fold holds 425 samples: the 2-station fold of
+partition 4.
 
 **Ablation, before and after** (paired ΔR², mean ± sd over 20 folds):
 
@@ -89,6 +125,13 @@ The 110 became decisions, as their causes were all away from the station pixel.
 |---|---|---|---|
 | Before: chip-level quality (job 247696) | 3,395 | +0.033 ± 0.052 | **+0.193 ± 0.223** (16 of 20 folds improved) |
 | **After: station-pixel quality** (job 247798) | **3,505** | **0.000** | **0.000** |
+
+**The baseline changed, so before and after are not like-for-like.** The before
+baseline kept 3,395 samples; the after baseline keeps 3,505, the same 110 samples more.
+Each ΔR² is paired within its own run, on the test samples both of its arms accept,
+but the two runs' baselines train and test on different sets. The supplementary
+chip-level arm inside job 247798 is the like-for-like comparison: same run, same
+folds, the two quality modes side by side.
 
 **The quality gate's negative effect did not just shrink; it went to zero.** The
 station-pixel gate refuses nothing on this cube, so removing it changes nothing. The
@@ -419,6 +462,13 @@ tell blindness from absence.
 | S6 dB values declared as linear | sensor physics **blind**; quality catches | 0 | 0 | 0 | **20/20** | 0/20 |
 
 **Every gate fired on every sample where its failure was present, and nowhere else.**
+**No over-sensitivity was seen.** The clean controls fired nothing:
+- the unperturbed samples: 0 of 20 on every gate;
+- the shared grid in grid mode, unshifted (G6): 0 of 20;
+- upsampling permitted and recorded (R2): 0 of 20, PASS_WITH_DECISION.
+
+The quality gate's 20 of 20 on G1–G3 is correct, not over-firing: the station really
+does lie outside those chips.
 The station-pixel quality gate also caught G1–G3 (the station lies outside the chip)
 and S6. In S6 the sample pixel reads −15.3, below the declared S1 floor of 1e-5:
 plausibility at the pixel catches a units error that the declaration-only physics
@@ -434,6 +484,16 @@ gate cannot see.
   it after the fact without a declared native resolution.
 - **S6 for the physics gate.** Sensor physics checks declarations and expressions, not
   values. A wrong declaration passes it; the plausible range is what catches it.
+
+**None of the three is an implementation bug.** In each, the gate does what its
+contract says, and the failure lies outside that contract. Two are candidate design
+gaps worth closing:
+- R3: a declared native GSD would let the resolution gate see upsampling done before
+  description;
+- S6: the physics gate could cross-check declared units against the value range
+  `describe()` already records.
+
+G4 needs image matching, which is out of scope for a metadata gate.
 
 **What this establishes.** On the real cube, geometry, resolution and sensor physics
 were silent because their failures were absent, not because the gates cannot see them,

@@ -398,6 +398,81 @@ That case is now caught by the per-pixel rules at assembly, not by the gate.
 before-and-after: the same cube, gated both ways, with refusal counts and the ablation
 re-run. The 2019 ablation uses the chip-level gate as it stands.
 
+## Window size (open question 1): design, fixed before any result (2026-10-30)
+
+An extension of the 2019 study, reported separately in docs/window_size.md. **The 1 × 1
+point-mode ablation remains the main result.** No new data: the fetched 1 km chips are
+100 × 100 px at 10 m.
+
+**Why.** Two effects compete as the window grows:
+- **Speckle:** SAR retrievals at high resolution are limited by speckle, and averaging
+  (multilooking) reduces it. Published accuracy improves over the first few
+  aggregations (20 → 40 → 60 m) and then stagnates.
+- **Spatial representativeness:** the probe measures a few centimetres of soil, and a
+  larger window averages ground the station does not represent.
+
+**Windows:** 1 × 1, 3 × 3, 5 × 5, 9 × 9 pixels (10, 30, 50, 90 m).
+- Each is centred on the station pixel, on each sensor's own grid: S1 on its 10 m grid;
+  S2 on the 10 m grid of B02.
+- S2's 20 m bands (B11, B12) and SCL are read at the centres of the 10 m cells, so each
+  20 m pixel is weighted by its overlap with the window.
+- S1 is averaged in **linear power**. Averaging dB would be the arithmetic the
+  sensor-physics gate refuses.
+- Same samples, same S2 date per sample, same stratified folds (5 partitions), same
+  random forest. Only the extraction changes.
+
+**Validity rule: the centre pixel must be valid; the window mean uses its valid pixels
+only.** Valid means the cube's per-pixel rules:
+- **S2:** SCL 4 or 5, and B02 ≥ 50.
+- **S1:** VV and VH finite, positive and not nodata.
+- **Outside the chip:** counts as invalid.
+
+**Why this rule:**
+- **It keeps the sample set identical at every size.** The centre is exactly the 1 × 1
+  sample, so any change in R² is the window's doing, not a change in which samples are
+  scored.
+- **"All pixels valid" is the strictest alternative, but it changes the sample set
+  with the window size.** It confounds the two.
+- **"A minimum valid fraction" needs a threshold with no basis.** 50% is reported as an
+  illustration only.
+
+**The cost of every rule is reported per size.** As a second, equally clean comparison,
+all sizes are also scored on the subset that is **fully valid at 9 × 9** (identical
+samples at every size).
+
+**Two aggregation orders:**
+- **Average-then-calculate (AtC):** mean the pixel values over the window, then predict
+  with a model trained on window means.
+- **Calculate-then-average (CtA):** the pixel-scale model (trained on 1 × 1 samples)
+  predicts every valid pixel in the test window, and the predictions are averaged.
+  - Pixels are paired across sensors by their offset from each sensor's station pixel;
+    the two grids differ by up to ~7 m (point-mode geometry).
+  - The same test samples as AtC.
+
+**Separating speckle from representativeness.** Two extra AtC arms:
+- **Window S1 only** (S2 at the station pixel): S1 is where speckle lives.
+- **Window S2 only** (S1 at the station pixel): S2 at 10 m has no speckle, so any
+  change there is smoothing or representativeness.
+
+Speckle predicts a gain from S1-only windowing that is similar across stations.
+Representativeness predicts losses that grow with the heterogeneity around a station.
+That is measured as the within-window spread of NDVI, and compared with per-station
+changes. **Descriptive, 17 stations, no significance claimed.**
+
+**Reported per size:**
+- r between S1 VV (dB of the window's linear mean) and soil moisture, per station;
+- R² absolute and anomaly, and the paired ΔR² against 1 × 1;
+- samples retained under each validity rule;
+- per-station results.
+
+**The gate connection.** The quality gate's own chip criteria are applied to each window:
+- refuse if more than 1% of non-nodata S2 pixels are outside the declared ranges;
+- refuse if more than 30% of S1 pixels are nodata.
+
+These window verdicts are compared with the chip's 110 refusals at each size. This
+answers at what window size chip-level validity stops being the wrong question for a
+sample.
+
 ## Download size and placement
 
 **Where data lives.** On the laptop, `data/` in the repo is a directory junction to
@@ -481,6 +556,7 @@ autumn and winter windows (e.g. 2019-11 and 2020-02) before Step 4 draws conclus
 ## Open questions
 
 1. **Point-to-pixel scale:** pixel vs 3 × 3 window (see matching step 5).
+   Being tested: "Window size (open question 1)" above; docs/window_size.md.
 2. **The temporal window:** is 10 days sensible for soil moisture after rain? It is
    arguably too long; this will be judged with data in Step 4.
 3. **dB:** the sensor-physics gate refuses additive arithmetic on dB. Whether any

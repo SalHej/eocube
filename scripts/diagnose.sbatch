@@ -17,7 +17,7 @@
 # perturb_gates.py (induced failures on 20 samples; writes copies under ~/work/data/perturb).
 
 set -euo pipefail
-WHAT=${1:?skill, bypass-fetch, bypass-assemble or perturb}
+WHAT=${1:?skill, bypass-fetch, bypass-assemble, perturb or residual}
 YEAR=${2:-2019}
 D=$HOME/work/data
 X=$HOME/eocube/experiments/open_cube
@@ -33,5 +33,7 @@ case "$WHAT" in
                        --out "$HOME/work/results/open_cube/bypass_$YEAR" ;;
   perturb)         python "$X/perturb_gates.py" --raw "$D/raw/open_cube/$YEAR" \
                        --work "$D/perturb/$YEAR" --out "$HOME/work/results/open_cube/perturb_$YEAR" ;;
+  residual)        python "$X/inspect_residual.py" --raw "$D/raw/open_cube/$YEAR" \
+                       --bypass "$D/raw/open_cube_bypass/$YEAR" --year "$YEAR" ;;
 esac
 echo "finished: $(date -Is)"

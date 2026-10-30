@@ -524,6 +524,12 @@ without moisture tracking, not as success.**
 **Download size:** point reads at 17 stations, a few MB in all, far below the 1 GB that
 needs approval.
 
+*Result 2026-10-30 (jobs 247810, 247812; docs/generalisation.md): neither arm
+generalises. SoilGrids barely varies across these stations; change detection does not
+beat predicting no change. VV is unused at held-out stations because its relation to
+soil moisture changes sign between and within stations. Next: normalise each station's
+radar by its own history (no labels needed).*
+
 ## Download size and placement
 
 **Where data lives.** On the laptop, `data/` in the repo is a directory junction to

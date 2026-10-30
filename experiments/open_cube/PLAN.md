@@ -473,6 +473,57 @@ These window verdicts are compared with the chip's 110 refusals at each size. Th
 answers at what window size chip-level validity stops being the wrong question for a
 sample.
 
+## Generalisation to unseen stations: design, fixed before any result (2026-10-30)
+
+An extension, reported in docs/generalisation.md. **The 1 x 1 point-mode ablation remains
+the main result.**
+
+**The problem:**
+- **Held-out stations:** the model's median R2 is -0.07.
+- **Held-out months, every station in training:** R2 0.18, against 0.55 for each
+  station's own mean.
+- **Anomaly R2 stays below zero** even after windowing.
+- **The diagnosis was features, not the split.** Our eight features carry nothing that
+  places an unseen station's level. Between-station differences are 37% of the variance
+  ("Power check").
+
+**Arm A, static auxiliary features at each station point:**
+- SoilGrids 2.0, 0-5 cm mean: clay, sand, silt (%), bulk density (kg/dm3) and organic
+  carbon (g/kg). Stored integers are divided by 10, 10, 10, 100 and 10, per ISRIC.
+- NASADEM elevation, and slope from a 3 x 3 window (Horn).
+- Compared: the baseline (8 features), static only (7), and baseline + static (15).
+
+**Arm B, change detection:**
+- **Target:** the change in soil moisture between consecutive S1 passes at a station.
+  - Primary: within one relative orbit, so viewing geometry cancels.
+  - Secondary: across orbits.
+- **Features:** the change in VV and VH in dB (the log of the linear ratio), the time
+  between passes, and the S2 bands at the later pass. A radar-only variant omits the S2.
+- **Comparisons, on the same pairs:**
+  - the baseline absolute model's implied change, p(t2) - p(t1);
+  - predicting no change.
+- **Its own target:** never mixed with the absolute metric.
+
+**For both arms:**
+- the same 3,505 samples, stratified station folds, 5 partitions and random forest
+  (300 trees);
+- absolute and anomaly R2;
+- permutation importance (the drop in held-out R2 when a feature is shuffled) for every
+  arm.
+
+**If an arm improves absolute R2 but not anomaly R2, that is reported as better fit
+without moisture tracking, not as success.**
+
+**Licences:**
+
+| Data | Source | Licence | Note |
+|---|---|---|---|
+| SoilGrids 2.0 | ISRIC, files.isric.org (public VRTs) | **CC-BY 4.0**, per the dataset's metadata record | ISRIC's FAQ page returned 502 on 2026-10-30; to be confirmed there. Attribution: Poggio et al. (2021), SOIL 7, 217-240 |
+| NASADEM | NASA/JPL, via Microsoft Planetary Computer (`nasadem`) | **US government work** (usa.gov government-works licence in the data.gov record) | Chosen over Copernicus DEM GLO-30, whose Planetary Computer licence is listed only as "other" |
+
+**Download size:** point reads at 17 stations, a few MB in all, far below the 1 GB that
+needs approval.
+
 ## Download size and placement
 
 **Where data lives.** On the laptop, `data/` in the repo is a directory junction to

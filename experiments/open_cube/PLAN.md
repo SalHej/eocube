@@ -556,7 +556,9 @@ autumn and winter windows (e.g. 2019-11 and 2020-02) before Step 4 draws conclus
 ## Open questions
 
 1. **Point-to-pixel scale:** pixel vs 3 × 3 window (see matching step 5).
-   Being tested: "Window size (open question 1)" above; docs/window_size.md.
+   Tested 2026-10-30 (job 247806, docs/window_size.md): within-orbit r(VV, SM) rises
+   0.313 -> 0.403 from 1 x 1 to 9 x 9; R2 shows no detectable change for AtC; CtA gains
+   come with anomaly R2 still below zero. The 1 x 1 point cube stays the method.
 2. **The temporal window:** is 10 days sensible for soil moisture after rain? It is
    arguably too long; this will be judged with data in Step 4.
 3. **dB:** the sensor-physics gate refuses additive arithmetic on dB. Whether any

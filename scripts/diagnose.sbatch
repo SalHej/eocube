@@ -9,13 +9,15 @@
 #   cd ~/work/logs && sbatch -A <account> ~/eocube/scripts/diagnose.sbatch skill
 #   cd ~/work/logs && sbatch -A <account> ~/eocube/scripts/diagnose.sbatch bypass-fetch
 #   cd ~/work/logs && sbatch -A <account> ~/eocube/scripts/diagnose.sbatch bypass-assemble
+#   cd ~/work/logs && sbatch -A <account> ~/eocube/scripts/diagnose.sbatch perturb
 #
 # Diagnostics for docs/open_ablation.md, not results: diagnose_skill.py (reads samples.csv
 # only) and bypass_cube.py (bypass-fetch reads the chips the fetcher's protections
-# replaced or withheld, from the Planetary Computer; bypass-assemble is local only).
+# replaced or withheld, from the Planetary Computer; bypass-assemble is local only) and
+# perturb_gates.py (induced failures on 20 samples; writes copies under ~/work/data/perturb).
 
 set -euo pipefail
-WHAT=${1:?skill, bypass-fetch or bypass-assemble}
+WHAT=${1:?skill, bypass-fetch, bypass-assemble or perturb}
 YEAR=${2:-2019}
 D=$HOME/work/data
 X=$HOME/eocube/experiments/open_cube
@@ -29,5 +31,7 @@ case "$WHAT" in
   bypass-assemble) python "$X/bypass_cube.py" assemble --raw "$D/raw/open_cube/$YEAR" \
                        --bypass "$D/raw/open_cube_bypass/$YEAR" --year "$YEAR" \
                        --out "$HOME/work/results/open_cube/bypass_$YEAR" ;;
+  perturb)         python "$X/perturb_gates.py" --raw "$D/raw/open_cube/$YEAR" \
+                       --work "$D/perturb/$YEAR" --out "$HOME/work/results/open_cube/perturb_$YEAR" ;;
 esac
 echo "finished: $(date -Is)"

@@ -51,7 +51,13 @@ import build_cube as bc                     # noqa: E402
 import fetch_year as fy                     # noqa: E402
 
 GATES = ("geometry_crs[point]", "geometry_crs", "resolution", "temporal_alignment",
-         "quality_missingness", "sensor_physics")
+         "quality_missingness[point]", "quality_missingness", "sensor_physics")
+#: The method: geometry and quality in point mode. CHIP_METHOD is the method before
+#: point-mode quality, kept so the before and after come from one run.
+METHOD = ("geometry_crs[point]", "resolution", "temporal_alignment",
+          "quality_missingness[point]", "sensor_physics")
+CHIP_METHOD = ("geometry_crs[point]", "resolution", "temporal_alignment",
+               "quality_missingness", "sensor_physics")
 ARMS = {"protected": {}, "first_tile": {"first_tile": True}, "future_s2": {"future": True},
         "no_edge": {"no_edge": True},
         "bypass_all": {"first_tile": True, "future": True, "no_edge": True},
@@ -256,10 +262,10 @@ def assemble(raw: Path, bypass: Path, out: Path, year: int, workers: int):
             v_all = collections.Counter(p[g] for p in per)
             v_chg = collections.Counter(p[g] for p, c in zip(per, changed) if c)
             arm["gates"][g] = {"all": dict(v_all), "changed": dict(v_chg)}
-        primary = [g for g in GATES if g != "geometry_crs"]           # point mode is selected
-        arm["refused_any_all"] = sum(any(p[g] == "refuse" for g in primary) for p in per)
-        arm["refused_any_changed"] = sum(any(p[g] == "refuse" for g in primary)
-                                         for p, c in zip(per, changed) if c)
+        for key, gates in (("", METHOD), ("_chip_quality", CHIP_METHOD)):
+            arm[f"refused_any_all{key}"] = sum(any(p[g] == "refuse" for g in gates) for p in per)
+            arm[f"refused_any_changed{key}"] = sum(any(p[g] == "refuse" for g in gates)
+                                                   for p, c in zip(per, changed) if c)
         summary[name] = arm
     (out / "bypass.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
 
@@ -273,8 +279,12 @@ def assemble(raw: Path, bypass: Path, out: Path, year: int, workers: int):
             a, ch = s["gates"][g]["all"].get("refuse", 0), s["gates"][g]["changed"].get("refuse", 0)
             cells.append(f"{a:>5}/{ch:<4}chg")
         print(f"{name:14s} {n:7d} {c:7d} {ref:>14} " + " ".join(f"{x:>16}" for x in cells))
-    print("\nrefusals per gate: all samples / of which changed vs protected. "
-          "'refused' counts the five gates with geometry in point mode.")
+    print("\nrefusals per gate: all samples / of which changed vs protected. 'refused' counts "
+          "the five gates with geometry and quality in point mode.")
+    for name, s in summary.items():
+        print(f"  {name}: changed samples refused {s['refused_any_changed']} of "
+              f"{s['changed_vs_protected']} (point quality), "
+              f"{s['refused_any_changed_chip_quality']} with chip quality")
 
 
 def main():

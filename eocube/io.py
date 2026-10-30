@@ -54,7 +54,8 @@ __all__ = [
 #:      declared nodata honoured when the file has none.
 #: 0.5: implausible_fraction against a declared plausible_range.
 #: 0.6: sample_pixel for a declared sample_point (point-sampled cubes).
-DESCRIPTOR_VERSION = "eocube-cube-descriptor/0.6"
+#: 0.7: the value at the sample pixel, its nodata and plausibility, and its QA class.
+DESCRIPTOR_VERSION = "eocube-cube-descriptor/0.7"
 
 #: Fields that can be read from a raster, and therefore verified.
 OBSERVABLE = (
@@ -70,7 +71,7 @@ OBSERVABLE = (
 DECLARED_ONLY = (
     "modality", "units", "calibrated", "terrain_corrected", "reflectance",
     "qa_mask_available", "qa_mask_applied", "acquisition_time", "sensor",
-    "processing_level", "plausible_range", "sample_point",
+    "processing_level", "plausible_range", "sample_point", "qa_mask_path", "qa_valid_classes",
 )
 
 
@@ -126,8 +127,9 @@ def _ground_gsd_m(transform, height: int) -> tuple[float, float]:
     return round(abs(transform.a) * m_lon, 3), round(abs(transform.e) * m_lat, 3)
 
 
-def _sample_pixel(src, lon: float, lat: float) -> dict[str, Any]:
-    """Where a declared sample point falls in this raster, for point-mode geometry.
+def _sample_pixel(src, lon: float, lat: float, *, assumed_nodata: float | None = None,
+                  plausible_range: Sequence[float | None] | None = None) -> dict[str, Any]:
+    """Where a declared sample point falls in this raster, and what is there.
 
     A point-sampled cube reads each layer at its own pixel containing the point, in
     its own CRS, with no common grid. What must then agree is the ground location
@@ -135,6 +137,13 @@ def _sample_pixel(src, lon: float, lat: float) -> dict[str, Any]:
     the raster, and the pixel centre in lon/lat with its distance from the point, so
     that :func:`eocube.check_geometry_crs` can compare layers without a geospatial
     stack of its own.
+
+    It also records the value at that pixel and whether it is an observation: nodata
+    or non-finite in any band, or outside the declared ``plausible_range``. In a
+    point-sampled cube that pixel is the sample. Layer-level fractions describe the
+    rest of the chip, which the sample never uses: on the 2019 Twente cube, 1,123
+    samples read through cloud, shadow, water or fill at the station passed every
+    layer-level gate (docs/open_ablation.md).
     """
     from rasterio.warp import transform as _tr
     x, y = _tr("EPSG:4326", src.crs, [lon], [lat])
@@ -142,9 +151,40 @@ def _sample_pixel(src, lon: float, lat: float) -> dict[str, Any]:
     inside = 0 <= row < src.height and 0 <= col < src.width
     cx, cy = src.xy(row, col)                  # pixel centre, in the raster's CRS
     clon, clat = _tr(src.crs, "EPSG:4326", [cx], [cy])
-    return {"point_lonlat": [lon, lat], "row": int(row), "col": int(col), "inside": bool(inside),
-            "centre_lonlat": [float(clon[0]), float(clat[0])],
-            "offset_m": round(_ground_distance_m(lon, lat, clon[0], clat[0]), 3)}
+    out = {"point_lonlat": [lon, lat], "row": int(row), "col": int(col), "inside": bool(inside),
+           "centre_lonlat": [float(clon[0]), float(clat[0])],
+           "offset_m": round(_ground_distance_m(lon, lat, clon[0], clat[0]), 3)}
+    if not inside:
+        return out
+    values = src.read(window=((row, row + 1), (col, col + 1)))[:, 0, 0]
+    nodata = [v if v is not None else assumed_nodata for v in src.nodatavals]
+    missing = any((nd is not None and not (isinstance(nd, float) and math.isnan(nd)) and v == nd)
+                  or (np.issubdtype(values.dtype, np.floating) and not np.isfinite(v))
+                  for v, nd in zip(values, nodata))
+    out["values"] = [_json_safe(v.item()) for v in values]
+    out["nodata"] = bool(missing)
+    if plausible_range is not None and not missing:
+        lo, hi = plausible_range
+        out["implausible"] = bool(any((lo is not None and v < lo) or (hi is not None and v > hi)
+                                      for v in values))
+    return out
+
+
+def _qa_at(path: str | Path, lon: float, lat: float, valid: Sequence[int]) -> dict[str, Any]:
+    """The QA class at a point, read from a quality raster on its own grid.
+
+    A quality mask is often a separate file at another resolution (Sentinel-2 SCL is
+    20 m; B02 is 10 m). Reading it at the same ground point, rather than at the same
+    row and column, keeps the two aligned whatever their grids.
+    """
+    from rasterio.warp import transform as _tr
+    with rasterio.open(path) as q:
+        x, y = _tr("EPSG:4326", q.crs, [lon], [lat])
+        row, col = q.index(x[0], y[0])
+        if not (0 <= row < q.height and 0 <= col < q.width):
+            return {"qa_inside": False, "qa_valid": False}
+        cls = q.read(1, window=((row, row + 1), (col, col + 1)))[0, 0].item()
+    return {"qa_inside": True, "qa_class": cls, "qa_valid": cls in set(valid)}
 
 
 def _ground_distance_m(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
@@ -376,10 +416,14 @@ def describe(
                 )
         # A declared fill value is used only where the file declares none:
         # that fills a gap in the file's metadata rather than contradicting it.
+        assumed = declared.get("nodata") if src.nodata is None else None
         point = declared.get("sample_point")
         if point is not None:
-            obs["sample_pixel"] = _sample_pixel(src, *point)
-        assumed = declared.get("nodata") if src.nodata is None else None
+            obs["sample_pixel"] = _sample_pixel(src, *point, assumed_nodata=assumed,
+                                                plausible_range=declared.get("plausible_range"))
+            qa_path, qa_valid = declared.get("qa_mask_path"), declared.get("qa_valid_classes")
+            if qa_path is not None and qa_valid is not None and obs["sample_pixel"]["inside"]:
+                obs["sample_pixel"].update(_qa_at(qa_path, *point, qa_valid))
         if read_stats:
             stats = _invalid_fraction(src, max_pixels=max_stat_pixels,
                                       assumed_nodata=assumed,

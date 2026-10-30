@@ -466,6 +466,7 @@ def check_quality_missingness(
     max_invalid_fraction: float = 0.30,
     gap_fill: str | None = None,
     max_implausible_fraction: float = 0.01,
+    mode: str = "grid",
 ) -> GateResult:
     """Verify that quality masks are honoured and gap-filling is declared.
 
@@ -497,9 +498,34 @@ def check_quality_missingness(
     touch them. A layer that declares a range that was never measured is reported as
     unmeasured. A layer that declares no range is not checked: physical plausibility
     depends on the sensor, units and surface, which the gate cannot infer.
+
+    ``mode="point"`` is for point-sampled cubes, where each layer contributes one pixel
+    at a declared ground point (see :func:`check_geometry_crs`). That pixel is the
+    sample, so it is what the gate judges: it refuses if, in any layer, the sample
+    pixel is outside the layer, nodata, outside the declared plausible range, or of a
+    QA class not in the declared ``qa_valid_classes``. Everything above is still
+    measured, but it describes the rest of the chip, which the sample never uses, so
+    it is recorded as a decision rather than refused. In grid mode the 2019 Twente cube
+    was refused 110 times for pixels that were not the sample, while 1,123 samples
+    read through cloud, shadow, water or fill at the station would have passed
+    (docs/open_ablation.md). Point mode reverses both. A layer with a QA mask but no
+    QA class read at the sample pixel is reported as unchecked, not as valid.
     """
+    if mode not in ("grid", "point"):
+        raise ValueError(f"quality mode must be 'grid' or 'point', not {mode!r}")
     res = GateResult(gate="quality_missingness", verdict=Verdict.PASS)
+    res.evidence["mode"] = mode
     per_layer: dict[str, Any] = {}
+
+    def chip_refuse(msg: str) -> None:
+        """A layer-level failure: refused in grid mode, recorded in point mode."""
+        if mode == "grid":
+            res.verdict = Verdict.REFUSE
+            res.reasons.append(msg)
+            return
+        if res.verdict is Verdict.PASS:
+            res.verdict = Verdict.PASS_WITH_DECISION
+        res.decisions.append(f"chip-level, not at the sample pixel: {msg}; recorded, not refused")
 
     for l in layers:
         name = l["name"]
@@ -531,8 +557,7 @@ def check_quality_missingness(
             )
         elif frac > max_invalid_fraction:
             if gap_fill is None:
-                res.verdict = Verdict.REFUSE
-                res.reasons.append(
+                chip_refuse(
                     f"layer '{name}' is {frac:.1%} invalid{how}, above the "
                     f"{max_invalid_fraction:.0%} threshold, and no gap-filling policy "
                     "was declared"
@@ -559,8 +584,7 @@ def check_quality_missingness(
             suspect = (f"layer '{name}' declares no nodata value, but {zero:.1%} of its "
                        f"pixels are exactly zero in all {bands} band(s){how}")
             if bands > 1 and zero > max_invalid_fraction and gap_fill is None:
-                res.verdict = Verdict.REFUSE
-                res.reasons.append(
+                chip_refuse(
                     f"{suspect}; that is almost certainly unflagged fill, above the "
                     f"{max_invalid_fraction:.0%} threshold. Declare the fill value "
                     "(declared={'nodata': 0}) or mask it"
@@ -587,8 +611,7 @@ def check_quality_missingness(
                     "not measured; physically implausible values are unknown, not absent"
                 )
             elif implausible > max_implausible_fraction:
-                res.verdict = Verdict.REFUSE
-                res.reasons.append(
+                chip_refuse(
                     f"layer '{name}': {implausible:.1%} of pixels are not nodata but lie "
                     f"outside the declared physical range {list(bounds)}{how}, above the "
                     f"{max_implausible_fraction:.0%} tolerance. These read as data and are "
@@ -603,11 +626,60 @@ def check_quality_missingness(
                     f"{max_implausible_fraction:.0%} tolerance; they must be masked, not used"
                 )
 
+        if mode == "point":
+            per_layer[name]["sample_pixel"] = _check_sample_pixel(l, res)
+
     res.evidence["per_layer"] = per_layer
     res.evidence["max_implausible_fraction"] = max_implausible_fraction
     if gap_fill:
         res.evidence["gap_fill_policy"] = gap_fill
     return res
+
+
+def _check_sample_pixel(layer: dict[str, Any], res: GateResult) -> dict[str, Any]:
+    """Point-mode quality: is the one pixel this layer contributes an observation?"""
+    name, px = layer["name"], layer.get("sample_pixel")
+    if px is None:
+        res.verdict = Verdict.REFUSE
+        res.reasons.append(
+            f"layer '{name}' has no sample_pixel; point-mode quality needs "
+            "describe(..., declared={'sample_point': (lon, lat)})")
+        return {}
+    found = {k: px[k] for k in ("inside", "values", "nodata", "implausible", "qa_class",
+                                "qa_valid") if k in px}
+    if not px.get("inside"):
+        res.verdict = Verdict.REFUSE
+        res.reasons.append(f"layer '{name}': the sample point lies outside the layer")
+        return found
+    if "nodata" not in px:
+        if res.verdict is Verdict.PASS:
+            res.verdict = Verdict.PASS_WITH_DECISION
+        res.decisions.append(
+            f"layer '{name}': the value at the sample pixel was not read; its validity is "
+            "unknown, not established")
+    elif px["nodata"]:
+        res.verdict = Verdict.REFUSE
+        res.reasons.append(f"layer '{name}': the sample pixel is nodata")
+    elif px.get("implausible"):
+        res.verdict = Verdict.REFUSE
+        res.reasons.append(
+            f"layer '{name}': the sample pixel reads {px.get('values')}, outside the declared "
+            f"physical range {list(layer.get('plausible_range', []))}; it reads as data and "
+            "is not an observation")
+    if layer.get("qa_mask_available"):
+        if "qa_valid" not in px:
+            if res.verdict is Verdict.PASS:
+                res.verdict = Verdict.PASS_WITH_DECISION
+            res.decisions.append(
+                f"layer '{name}' has a QA mask, but its class at the sample pixel was not read "
+                "(declare qa_mask_path and qa_valid_classes); cloud and shadow there are "
+                "unchecked")
+        elif not px["qa_valid"]:
+            res.verdict = Verdict.REFUSE
+            res.reasons.append(
+                f"layer '{name}': QA class {px.get('qa_class')} at the sample pixel is not one of "
+                f"the declared valid classes {list(layer.get('qa_valid_classes', []))}")
+    return found
 
 
 # --------------------------------------------------------------------------------
@@ -799,6 +871,7 @@ def run_all_gates(
                 max_invalid_fraction=kwargs.get("max_invalid_fraction", 0.30),
                 gap_fill=kwargs.get("gap_fill"),
                 max_implausible_fraction=kwargs.get("max_implausible_fraction", 0.01),
+                mode=kwargs.get("quality_mode", "grid"),
             )
         )
     if "sensor_physics" not in skip:

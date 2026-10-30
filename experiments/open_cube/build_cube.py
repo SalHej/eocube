@@ -31,6 +31,11 @@ Geometry is checked twice, undecided between the two (docs/cube_2019.md):
     sensor at the station in its own CRS, so mixed UTM zones are refused.
   - point mode, reported alongside: every layer must have been read at the same
     declared ground point, consistently, wherever its grid lies.
+Quality is likewise judged twice:
+  - chip mode, the default: invalid and implausible fractions over each 1 km chip;
+  - point mode, the method for this cube (PLAN.md): the sample pixel itself must be an
+    observation (not nodata, inside the declared range, SCL 4/5 for S2). Chip-level
+    findings are recorded as decisions.
 Outputs: samples.csv, dropped.csv, gates.json, summary.json.
 """
 
@@ -52,6 +57,7 @@ from rasterio.warp import transform
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from eocube import check_geometry_crs, run_all_gates   # noqa: E402
+from eocube.contracts import check_quality_missingness   # noqa: E402
 from eocube.io import describe              # noqa: E402
 
 S2_BANDS = ("B02", "B03", "B04", "B08", "B11", "B12")
@@ -226,10 +232,11 @@ def assemble(raw: Path, year: int):
 def run_gates(samples, window_days: float, lonlat: dict):
     cache = {}
 
-    def desc(path: Path, name: str, declared: dict, station: str):
+    def desc(path: Path, name: str, declared: dict, station: str, qa: Path | None = None):
         if path not in cache:
+            extra = {} if qa is None else {"qa_mask_path": str(qa), "qa_valid_classes": SCL_USABLE}
             cache[path] = describe(path, name,
-                                   declared={**declared, "sample_point": lonlat[station]})
+                                   declared={**declared, "sample_point": lonlat[station], **extra})
         return cache[path]
 
     verdicts = collections.defaultdict(collections.Counter)
@@ -239,7 +246,8 @@ def run_gates(samples, window_days: float, lonlat: dict):
     for row, pol, f2 in samples:
         stn = row["station"]
         layers = [desc(pol["VV"], "S1_VV", DECLARED_S1, stn), desc(pol["VH"], "S1_VH", DECLARED_S1, stn)]
-        layers += [desc(f2[b], f"S2_{b}", {**DECLARED_S2, **({} if b == "B02" else {"plausible_range": (0, 12000)})}, stn)
+        layers += [desc(f2[b], f"S2_{b}", {**DECLARED_S2, **({} if b == "B02" else {"plausible_range": (0, 12000)})}, stn,
+                        qa=f2["SCL"])
                    for b in S2_BANDS]
         t1, t2 = utc(row["s1_time"]), utc(row["s2_time"])
         rep = run_all_gates(layers, acquisitions={"S1": [t1], "S2": [t2]}, target_time=t1,
@@ -256,10 +264,17 @@ def run_gates(samples, window_days: float, lonlat: dict):
         verdicts["geometry_crs[point]"][point.verdict.value] += 1
         for r in point.reasons:
             reasons["geometry_crs[point]"][_generic(r)] += 1
+        qpoint = check_quality_missingness(layers, mode="point")
+        verdicts["quality_missingness[point]"][qpoint.verdict.value] += 1
+        for r in qpoint.reasons:
+            reasons["quality_missingness[point]"][_generic(r)] += 1
+        for d in qpoint.decisions:
+            decisions["quality_missingness[point]"][_generic(d)] += 1
         crs_pair = (layers[0]["crs"], layers[2]["crs"])
         verdicts["crs_pair S1|S2"][" | ".join(map(str, crs_pair))] += 1
         per_sample.append({"station": row["station"], "s1_time": row["s1_time"], **v,
                            "geometry_crs[point]": point.verdict.value,
+                           "quality_missingness[point]": qpoint.verdict.value,
                            "point_max_pairwise_centre_m": point.evidence.get("max_pairwise_centre_m"),
                            "crs_pair": list(crs_pair)})
     return verdicts, reasons, decisions, per_sample

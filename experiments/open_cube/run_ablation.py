@@ -10,8 +10,11 @@ run on every sample's real layers, so an arm is a filter on those recorded verdi
 - baseline: a sample is kept unless any of the five gates refused it;
 - "without <gate>": refusals by that gate are ignored, every other gate still applies.
 
-Geometry is judged in point mode (PLAN.md, "Geometry mode"). The grid-mode verdict is
-run as a supplementary arm, to show what the design not chosen would have cost.
+Geometry and quality are judged in point mode (PLAN.md): geometry checks that every
+layer was read at the station; quality checks that the station pixel is an observation.
+Two supplementary arms swap one gate back to its layer-level form: geometry in grid
+mode (the design not chosen), and quality in chip mode (the method before point-mode
+quality, docs/open_ablation.md "Before and after").
 
 Folds are the stratified spatial blocks (PLAN.md, "Block design"): 4 folds, one eastern
 station in each, the partition varying with the seed. Never a random split. The model
@@ -55,12 +58,17 @@ from blocks import EAST, stratified        # noqa: E402
 from eocube.baselines import make_random_forest   # noqa: E402
 
 FEATURES = ("vv", "vh", "B02", "B03", "B04", "B08", "B11", "B12")
-#: The five gates, and the per-sample verdict each is read from. Point mode for geometry.
+#: The five gates, and the per-sample verdict each is read from. Point mode for geometry
+#: and quality.
 GATES = {"geometry_crs": "geometry_crs[point]", "resolution": "resolution",
-         "temporal_alignment": "temporal_alignment", "quality_missingness": "quality_missingness",
-         "sensor_physics": "sensor_physics"}
+         "temporal_alignment": "temporal_alignment",
+         "quality_missingness": "quality_missingness[point]", "sensor_physics": "sensor_physics"}
 BASELINE = "<all gates active>"
 GRID = "geometry in grid mode (not selected)"
+CHIP = "quality in chip mode (before)"
+#: Supplementary arms: {arm: (gate swapped, per-sample verdict used instead)}.
+SUPPLEMENTARY = {GRID: ("geometry_crs", "geometry_crs"),
+                 CHIP: ("quality_missingness", "quality_missingness")}
 DETECTION_LIMIT = 0.05
 
 
@@ -88,11 +96,13 @@ def load(cube: Path):
     stn = np.array([r["station"] for r in rows])
     sm_group = np.array([f"{r['station']}-{datetime.fromisoformat(r['s1_time']).month:02d}"
                          for r in rows])
-    refused = {g: np.array([p[k] == "refuse" for p in per]) for g, k in GATES.items()}
-    refused_grid = np.array([p["geometry_crs"] == "refuse" for p in per])
-    decided = {g: np.array([p[k] == "pass_with_decision" for p in per]) for g, k in GATES.items()}
-    decided_grid = np.array([p["geometry_crs"] == "pass_with_decision" for p in per])
-    return X, y, sm_group, stn, (refused, refused_grid), (decided, decided_grid)
+    def verdict(key, v):
+        return np.array([p[key] == v for p in per])
+    refused = {g: verdict(k, "refuse") for g, k in GATES.items()}
+    decided = {g: verdict(k, "pass_with_decision") for g, k in GATES.items()}
+    alt_refused = {a: (g, verdict(k, "refuse")) for a, (g, k) in SUPPLEMENTARY.items()}
+    alt_decided = {a: (g, verdict(k, "pass_with_decision")) for a, (g, k) in SUPPLEMENTARY.items()}
+    return X, y, sm_group, stn, (refused, alt_refused), (decided, alt_decided)
 
 
 def arms(verdicts, decisions) -> dict[str, tuple[str | None, np.ndarray, int]]:
@@ -101,18 +111,21 @@ def arms(verdicts, decisions) -> dict[str, tuple[str | None, np.ndarray, int]]:
     Decisions are counted as gate verdicts of PASS_WITH_DECISION, one per gate per
     sample; a removed gate records none.
     """
-    (refused, refused_grid), (decided, decided_grid) = verdicts, decisions
+    (refused, alt_refused), (decided, alt_decided) = verdicts, decisions
 
-    def arm(skip=(), grid=False):
-        r = dict(refused, **({"geometry_crs": refused_grid} if grid else {}))
-        d = dict(decided, **({"geometry_crs": decided_grid} if grid else {}))
+    def arm(skip=(), alt=None):
+        r, d = dict(refused), dict(decided)
+        if alt is not None:
+            g, r[g] = alt_refused[alt]
+            _, d[g] = alt_decided[alt]
         kept = ~np.any([v for g, v in r.items() if g not in skip], axis=0)
         n_dec = int(sum((v & kept).sum() for g, v in d.items() if g not in skip))
         return (skip[0] if skip else None), kept, n_dec
     out = {BASELINE: arm()}
     for g in GATES:
         out[f"without {g}"] = arm(skip=(g,))
-    out[GRID] = arm(grid=True)
+    for a in SUPPLEMENTARY:
+        out[a] = arm(alt=a)
     return out
 
 
@@ -203,6 +216,7 @@ def main():
             "below_detection_limit": abs(st.mean(d)) < DETECTION_LIMIT and abs(st.mean(da)) < DETECTION_LIMIT})
     result = {"cube": str(a.cube), "seeds": a.seeds, "features": FEATURES,
               "model": "RandomForestRegressor(n_estimators=300)", "geometry_mode": "point",
+              "quality_mode": "point",
               "detection_limit_d_r2": DETECTION_LIMIT, "n_samples": len(y), "folds": folds,
               "summary": summary, "runs": runs}
     (out / "ablation.json").write_text(json.dumps(result, indent=1), encoding="utf-8")

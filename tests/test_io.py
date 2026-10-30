@@ -529,3 +529,129 @@ def test_sub_threshold_fill_triggers_plausibility(make_tif):
     g = _quality_gate(describe(make_tif("vv2", data), "S1_VV",
                                declared={"plausible_range": (1e-5, None)}))
     assert g.verdict is Verdict.REFUSE
+
+
+# --------------------------------------------------------------------------
+# point-mode quality: the sample pixel is the sample, the rest of the chip is not
+# --------------------------------------------------------------------------
+def _at_station(make_tif, name, data, crs="EPSG:32632", res=10, nodata=None, dtype="float32"):
+    """A chip centred on STATION, and the (row, col) of the station pixel in it."""
+    from rasterio.warp import transform as tr
+    data = np.asarray(data, dtype=dtype)
+    n = data.shape[0]
+    x, y = tr("EPSG:4326", crs, [STATION[0]], [STATION[1]])
+    origin = (x[0] - res * n / 2 + res / 4, y[0] + res * n / 2 - res / 4)   # off pixel edges
+    path = make_tif(name, data, crs=crs, res=(res, res), origin=origin, nodata=nodata, dtype=dtype)
+    px = describe(path, declared={"sample_point": STATION})["sample_pixel"]
+    return path, (px["row"], px["col"])
+
+
+def _s2_band(make_tif, band, qa_class=4, n=10):
+    """A clean 10 m S2 band (500 DN), with a 20 m SCL mask of one class, at STATION."""
+    path, rc = _at_station(make_tif, band, np.full((n, n), 500.0))
+    qa, _ = _at_station(make_tif, f"{band}_scl", np.full((n // 2, n // 2), qa_class),
+                        res=20, dtype="uint8")
+    return path, rc, qa
+
+
+def _point_declared(qa, rng=(50, 12000)):
+    return {"sample_point": STATION, "plausible_range": rng, "qa_mask_available": True,
+            "qa_mask_applied": True, "qa_mask_path": str(qa), "qa_valid_classes": (4, 5)}
+
+
+def _quality(layer, mode):
+    return run_all_gates([layer], quality_mode=mode,
+                         skip=["geometry_crs", "resolution", "temporal_alignment",
+                               "sensor_physics"]).results[0]
+
+
+def test_describe_records_value_and_qa_class_at_sample_pixel(make_tif):
+    path, rc, qa = _s2_band(make_tif, "B02", qa_class=4)
+    px = describe(path, "S2_B02", declared=_point_declared(qa))["sample_pixel"]
+    assert px["values"] == [500.0]
+    assert px["nodata"] is False and px["implausible"] is False
+    assert px["qa_class"] == 4 and px["qa_valid"] is True
+
+
+def test_point_quality_records_chip_fill_away_from_the_sample_pixel(make_tif):
+    """The 110 Twente refusals: implausible pixels in the chip, a valid station pixel."""
+    path, (r, c), qa = _s2_band(make_tif, "B02")
+    with rasterio.open(path, "r+") as dst:
+        a = dst.read(1)
+        a[r - 1 if r > 2 else r + 2, :] = 1.0                    # a fill row, not the station's
+        dst.write(a, 1)
+    layer = describe(path, "S2_B02", declared=_point_declared(qa))
+    assert layer["implausible_fraction"] == pytest.approx(0.1)
+    assert _quality(layer, "grid").verdict is Verdict.REFUSE
+    g = _quality(layer, "point")
+    assert g.verdict is Verdict.PASS_WITH_DECISION
+    assert any(d.startswith("chip-level, not at the sample pixel") for d in g.decisions)
+
+
+def test_point_quality_refuses_cloud_at_the_sample_pixel(make_tif):
+    """The 1,123 Twente samples: a clean-looking chip, cloud at the station."""
+    path, _, qa = _s2_band(make_tif, "B04", qa_class=9)          # SCL 9: cloud, high
+    layer = describe(path, "S2_B04", declared=_point_declared(qa))
+    assert _quality(layer, "grid").verdict is Verdict.PASS
+    g = _quality(layer, "point")
+    assert g.verdict is Verdict.REFUSE
+    assert any("QA class 9 at the sample pixel" in r for r in g.reasons)
+
+
+def test_point_quality_refuses_fill_at_the_sample_pixel(make_tif):
+    """One fill pixel is 1% of the chip, within the layer tolerance, and it is the sample."""
+    path, (r, c), qa = _s2_band(make_tif, "B02")
+    with rasterio.open(path, "r+") as dst:
+        a = dst.read(1)
+        a[r, c] = 1.0
+        dst.write(a, 1)
+    layer = describe(path, "S2_B02", declared=_point_declared(qa))
+    assert _quality(layer, "grid").verdict is Verdict.PASS_WITH_DECISION
+    g = _quality(layer, "point")
+    assert g.verdict is Verdict.REFUSE
+    assert any("outside the declared physical range" in r for r in g.reasons)
+
+
+def test_point_quality_refuses_nodata_at_the_sample_pixel(make_tif):
+    data = np.full((10, 10), 0.05)
+    path, (r, c) = _at_station(make_tif, "vv", data, nodata=-32768.0)
+    with rasterio.open(path, "r+") as dst:
+        a = dst.read(1)
+        a[r, c] = -32768.0
+        dst.write(a, 1)
+    layer = describe(path, "S1_VV", declared={"sample_point": STATION,
+                                              "plausible_range": (1e-5, None)})
+    assert layer["sample_pixel"]["nodata"] is True
+    g = _quality(layer, "point")
+    assert g.verdict is Verdict.REFUSE
+    assert any("the sample pixel is nodata" in r for r in g.reasons)
+
+
+def test_point_quality_passes_a_clean_sample_pixel(make_tif):
+    path, _, qa = _s2_band(make_tif, "B08", qa_class=5)
+    g = _quality(describe(path, "S2_B08", declared=_point_declared(qa)), "point")
+    assert g.verdict is Verdict.PASS
+    assert g.evidence["per_layer"]["S2_B08"]["sample_pixel"]["qa_valid"] is True
+
+
+def test_point_quality_without_sample_pixel_is_refused(make_tif):
+    path, _, qa = _s2_band(make_tif, "B03")
+    layer = describe(path, "S2_B03", declared={"plausible_range": (50, 12000)})
+    g = _quality(layer, "point")
+    assert g.verdict is Verdict.REFUSE
+    assert any("has no sample_pixel" in r for r in g.reasons)
+
+
+def test_point_quality_unread_qa_class_is_unchecked_not_valid(make_tif):
+    path, _, _ = _s2_band(make_tif, "B11")
+    layer = describe(path, "S2_B11", declared={"sample_point": STATION, "qa_mask_available": True,
+                                               "qa_mask_applied": True})
+    g = _quality(layer, "point")
+    assert g.verdict is Verdict.PASS_WITH_DECISION
+    assert any("cloud and shadow there are unchecked" in d for d in g.decisions)
+
+
+def test_quality_mode_must_be_grid_or_point():
+    from eocube.contracts import check_quality_missingness
+    with pytest.raises(ValueError):
+        check_quality_missingness([], mode="pixel")

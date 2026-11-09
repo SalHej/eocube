@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+**Added**
+- **Constant-band detection.** `describe()` records `constant_bands`: every band whose
+  valid (finite, non-nodata) pixels all hold one value, with that value. Descriptor 0.8.
+  - A band with zero spatial variance across a scene is almost certainly not an
+    observation. Such a band is finite, inside any plausible range and not nodata, so
+    every earlier check read it as clean data.
+  - `check_quality_missingness` refuses a multi-band layer with a constant band in grid
+    and point mode alike, because the sample pixel reads that constant too.
+  - A single-band layer that is constant gets a decision, not a refusal: a coarse grid
+    clipped to a small chip, or a one-class mask, is legitimately constant.
+- **Detection is by exact equality (min == max over valid pixels), not by a standard
+  deviation.** A `std > 0` test fails both ways on real float64 data:
+  - rounding gives a constant float64 band a standard deviation of about 1e-17, so it
+    reads as varying;
+  - a band containing `-inf` gives NaN under `nanstd`, which `nanstd` does not skip, and
+    `NaN > 0` is false, so a varying band reads as constant.
+- **Real multi-sensor data revealed this:** private Sentinel-1, Sentinel-2 and
+  TerraSAR-X composites over a peatland site.
+  - In 13 of 13 Sentinel-2 composites for one season, 9 of 13 spectral bands and the
+    mask band each held a single value.
+  - In other files, `-inf` fill covered up to 100% of pixels.
+  - A first reconnaissance script using `std > 0` reported the reverse of the truth.
+  - Like the Sentinel-1 lower bound, this is a gate change that real data forced.
+
 ## v0.4.0
 
 **Added**

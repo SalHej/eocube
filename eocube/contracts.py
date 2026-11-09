@@ -499,6 +499,16 @@ def check_quality_missingness(
     unmeasured. A layer that declares no range is not checked: physical plausibility
     depends on the sensor, units and surface, which the gate cannot infer.
 
+    A band can also be finite, in range and not nodata, and still not be an observation.
+    ``constant_bands`` (measured by :func:`eocube.io.describe`) lists bands with zero
+    spatial variance. In a multi-band layer such a band is refused in both modes:
+    the sample pixel reads the same constant, so point mode cannot excuse it as chip-level.
+    The case that prompted this: Sentinel-2 composites for Ezerelis in which, in all 13
+    files for 2025, bands 5 to 13 each held one value, and every other check passed them.
+    A single
+    constant band is recorded as a decision, because a coarse grid clipped to a small
+    chip, or a mask with one class, is legitimately constant.
+
     ``mode="point"`` is for point-sampled cubes, where each layer contributes one pixel
     at a declared ground point (see :func:`check_geometry_crs`). That pixel is the
     sample, so it is what the gate judges: it refuses if, in any layer, the sample
@@ -596,6 +606,28 @@ def check_quality_missingness(
                     f"{suspect}; if that is fill, the true invalid fraction is at "
                     "least this high"
                 )
+
+        constant = l.get("constant_bands")
+        if constant:
+            per_layer[name]["constant_bands"] = [dict(c) for c in constant]
+            bands = int(l.get("band_count", 1) or 1)
+            listed = ", ".join(f"band {c['band']} = {c['value']}" for c in constant)
+            what = (f"layer '{name}': {len(constant)} of {bands} band(s) have zero spatial "
+                    f"variance over their valid pixels{how} ({listed})")
+            if bands > 1:
+                res.verdict = Verdict.REFUSE
+                res.reasons.append(
+                    f"{what}. A band that holds one value across a scene is almost certainly "
+                    "not an observation (a composite of fill, a failed export, a placeholder); "
+                    "every pixel, the sample pixel included, reads that value. Find out why, "
+                    "or build the layer from the bands that vary")
+            else:
+                if res.verdict is Verdict.PASS:
+                    res.verdict = Verdict.PASS_WITH_DECISION
+                res.decisions.append(
+                    f"{what}. A single constant band can be legitimate (a coarse grid over a "
+                    "small chip, a mask with one class), so it is recorded, not refused; it "
+                    "carries no spatial information")
 
         bounds = l.get("plausible_range")
         if bounds is not None:

@@ -55,14 +55,15 @@ __all__ = [
 #: 0.5: implausible_fraction against a declared plausible_range.
 #: 0.6: sample_pixel for a declared sample_point (point-sampled cubes).
 #: 0.7: the value at the sample pixel, its nodata and plausibility, and its QA class.
-DESCRIPTOR_VERSION = "eocube-cube-descriptor/0.7"
+#: 0.8: constant_bands, bands with zero spatial variance over their valid pixels.
+DESCRIPTOR_VERSION = "eocube-cube-descriptor/0.8"
 
 #: Fields that can be read from a raster, and therefore verified.
 OBSERVABLE = (
     "crs", "transform", "width", "height", "gsd", "gsd_units", "gsd_ground_m", "dtype",
     "nodata", "invalid_fraction", "invalid_fraction_by_band", "invalid_fraction_sampling",
     "zero_fill_fraction", "band_count", "value_range", "implausible_fraction",
-    "implausible_fraction_by_band", "sample_pixel",
+    "implausible_fraction_by_band", "sample_pixel", "constant_bands",
 )
 
 #: Fields that cannot be derived from pixels and must be declared by the
@@ -237,6 +238,17 @@ def _invalid_fraction(
     lower bound alone is often the right declaration: an upper bound guessed for SAR
     (10, linear) flagged real strong scatterers (VV up to 1043) in 1,128 of 3,505
     Twente samples.
+
+    ``constant_bands`` lists the bands (1-based) whose valid pixels all hold one value,
+    each with that value. A band with zero spatial variance across a scene is almost
+    certainly not an observation: no sensor returns the same number from every pixel of
+    a real surface. Every check above passed such bands. In all 13 Ezerelis Sentinel-2
+    composites for 2025, bands 5 to 13 and the "mask" band each held a single value
+    across the scene; only bands 1 to 4 varied. Each band was finite, in range and not
+    nodata, so each read as clean data. Exact equality is the test, not a standard
+    deviation: the float64 std of a constant band came out above zero from rounding, and
+    a script that tested ``std > 0`` reported those bands as varying. A band with fewer
+    than two valid pixels is not judged.
     """
     h, w = src.height, src.width
     step = max(1, int(math.sqrt((h * w) / max_pixels)))
@@ -260,6 +272,7 @@ def _invalid_fraction(
     all_zero = np.ones(shape, dtype=bool)
     by_band: list[float] = []
     implausible_by_band: list[float] = []
+    constant: list[dict[str, Any]] = []
     lo, hi = math.inf, -math.inf
     for b in range(1, src.count + 1):
         data = src.read(b, out_shape=shape)
@@ -276,7 +289,10 @@ def _invalid_fraction(
         by_band.append(round(float(bad.mean()), 6))
         valid = data[~bad]
         if valid.size:
-            lo, hi = min(lo, float(valid.min())), max(hi, float(valid.max()))
+            vmin, vmax = float(valid.min()), float(valid.max())
+            lo, hi = min(lo, vmin), max(hi, vmax)
+            if valid.size > 1 and vmin == vmax:
+                constant.append({"band": b, "value": _json_safe(vmin)})
         if plausible_range is not None:
             plo, phi = plausible_range               # either bound may be None: unbounded
             implausible = np.zeros(shape, dtype=bool)
@@ -291,6 +307,7 @@ def _invalid_fraction(
         "invalid_fraction": round(float(any_bad.mean()), 6),
         "invalid_fraction_by_band": by_band,
         "value_range": [lo, hi] if lo <= hi else None,
+        "constant_bands": constant,
         **sampling,
     }
     if plausible_range is not None:
@@ -431,6 +448,7 @@ def describe(
             obs["invalid_fraction"] = stats.pop("invalid_fraction")
             obs["invalid_fraction_by_band"] = stats.pop("invalid_fraction_by_band")
             obs["value_range"] = stats.pop("value_range")
+            obs["constant_bands"] = stats.pop("constant_bands")
             for key in ("zero_fill_fraction", "implausible_fraction",
                         "implausible_fraction_by_band"):
                 if key in stats:

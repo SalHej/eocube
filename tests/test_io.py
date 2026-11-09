@@ -547,8 +547,13 @@ def _at_station(make_tif, name, data, crs="EPSG:32632", res=10, nodata=None, dty
 
 
 def _s2_band(make_tif, band, qa_class=4, n=10):
-    """A clean 10 m S2 band (500 DN), with a 20 m SCL mask of one class, at STATION."""
-    path, rc = _at_station(make_tif, band, np.full((n, n), 500.0))
+    """A clean 10 m S2 band (500 DN), with a 20 m SCL mask of one class, at STATION.
+
+    One corner pixel reads 510: a band of a single value is not an observation
+    (constant_bands), and this fixture stands for a clean one."""
+    data = np.full((n, n), 500.0)
+    data[0, 0] = 510.0                                    # away from the station pixel
+    path, rc = _at_station(make_tif, band, data)
     qa, _ = _at_station(make_tif, f"{band}_scl", np.full((n // 2, n // 2), qa_class),
                         res=20, dtype="uint8")
     return path, rc, qa
@@ -655,3 +660,98 @@ def test_quality_mode_must_be_grid_or_point():
     from eocube.contracts import check_quality_missingness
     with pytest.raises(ValueError):
         check_quality_missingness([], mode="pixel")
+
+
+# --------------------------------------------------------------------------
+# constant bands: finite, in range, not nodata, and still not an observation
+# --------------------------------------------------------------------------
+def _ezerelis_like(constant_spectral=True):
+    """A miniature of an Ezerelis Sentinel-2 composite: 13 TOA bands (0-1) and a mask.
+
+    With ``constant_spectral``, the 2025 shape: bands 1-4 vary, bands 5-13 and the mask
+    each hold one value. Without it, the shape of three 2026 files: every spectral band
+    varies and the mask is 0 everywhere. All values are synthetic."""
+    rng = np.random.default_rng(0)
+    data = 0.05 + 0.3 * rng.random((14, 10, 10))
+    if constant_spectral:
+        data[4:13] = np.linspace(0.04, 0.4, 9)[:, None, None]   # one value per band
+        data[13] = 1.0                                          # the "mask"
+    else:
+        data[13] = 0.0
+    return data
+
+
+def test_constant_bands_measured_with_their_values(make_tif):
+    data = np.full((3, 10, 10), 0.2)
+    data[0] += np.linspace(0, 0.1, 100).reshape(10, 10)       # band 1 varies
+    data[2] = 1.0
+    layer = describe(make_tif(data=data, dtype="float64"))
+    assert layer["constant_bands"] == [{"band": 2, "value": 0.2}, {"band": 3, "value": 1.0}]
+    assert layer["invalid_fraction"] == 0.0                   # every other check sees data
+    assert "constant_bands" in layer["provenance"]["observed"]
+
+
+def test_varying_bands_are_not_constant(make_tif):
+    data = np.arange(200, dtype="float32").reshape(2, 10, 10)
+    assert describe(make_tif(data=data))["constant_bands"] == []
+
+
+def test_constant_float64_band_is_found_by_equality_not_std(make_tif):
+    """np.std of a constant float64 band can be above zero from rounding; on the real
+    2025 files a std > 0 test reported every constant band as varying."""
+    data = np.full((2, 50, 50), 0.1 + 0.2)                # 0.30000000000000004
+    data[0] += np.linspace(0, 1, 2500).reshape(50, 50)
+    assert describe(make_tif(data=data, dtype="float64"))["constant_bands"] == [
+        {"band": 2, "value": 0.1 + 0.2}]
+
+
+def test_constant_band_ignores_nodata_and_nonfinite(make_tif):
+    data = np.full((2, 10, 10), 0.3)
+    data[0, :5] = -9999.0                       # band 1: flagged fill around one value
+    data[1, :5] = np.nan                        # band 2: NaN around one value
+    data[1, 5:, :5] = 0.7                       # ...and a second value: varies
+    layer = describe(make_tif(data=data, nodata=-9999.0, dtype="float64"))
+    assert layer["constant_bands"] == [{"band": 1, "value": 0.3}]
+
+
+def test_band_with_under_two_valid_pixels_is_not_judged(make_tif):
+    data = np.full((2, 5, 5), -9999.0)
+    data[0, 0, 0] = 0.4                         # one valid pixel: no variance to measure
+    data[1] = np.arange(25).reshape(5, 5)
+    layer = describe(make_tif(data=data, nodata=-9999.0))
+    assert layer["constant_bands"] == []
+
+
+def test_constant_band_in_multiband_layer_refused_in_both_modes(make_tif):
+    """The 2025 case: only bands 1-4 vary, and the sample pixel looks clean."""
+    path, _ = _at_station(make_tif, "s2", _ezerelis_like(), dtype="float64")
+    layer = describe(path, "S2_TOA", declared={"sample_point": STATION,
+                                                "plausible_range": (0, 1.5)})
+    assert [c["band"] for c in layer["constant_bands"]] == list(range(5, 15))
+    assert layer["sample_pixel"]["implausible"] is False   # the sample reads as clean data
+    for mode in ("grid", "point"):
+        g = _quality(layer, mode)
+        assert g.verdict is Verdict.REFUSE, mode
+        assert any("10 of 14 band(s) have zero spatial variance" in r for r in g.reasons), mode
+        assert len(g.evidence["per_layer"]["S2_TOA"]["constant_bands"]) == 10
+
+
+def test_constant_mask_band_alone_refuses_a_varying_stack(make_tif):
+    """Three 2026 files: 13 spectral bands vary, the mask band is 0 everywhere."""
+    layer = describe(make_tif(data=_ezerelis_like(constant_spectral=False), dtype="float64"))
+    assert layer["constant_bands"] == [{"band": 14, "value": 0.0}]
+    g = _quality(layer, "grid")
+    assert g.verdict is Verdict.REFUSE
+    assert any("1 of 14 band(s)" in r and "band 14 = 0.0" in r for r in g.reasons)
+
+
+def test_single_constant_band_is_a_decision_not_a_refusal(make_tif):
+    """A coarse grid clipped to a small chip is legitimately one value."""
+    g = _quality(describe(make_tif("rain", np.full((10, 10), 2.5))), "grid")
+    assert g.verdict is Verdict.PASS_WITH_DECISION
+    assert any("zero spatial variance" in d for d in g.decisions)
+
+
+def test_constant_bands_unmeasured_without_stats(make_tif):
+    layer = describe(make_tif(data=np.ones((3, 5, 5))), read_stats=False)
+    assert "constant_bands" not in layer
